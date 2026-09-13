@@ -20,6 +20,7 @@ fn omk_route_finish_rejects_late_cleanup_abort() {
             aad_allowed: true,
             backend: Some(backend),
             finalized: false,
+            call_gate: Arc::new(Mutex::new(())),
         },
     );
 
@@ -115,6 +116,7 @@ fn omk_route_abort_clears_operation_mapping() {
             aad_allowed: true,
             backend: Some(backend),
             finalized: false,
+            call_gate: Arc::new(Mutex::new(())),
         },
     );
 
