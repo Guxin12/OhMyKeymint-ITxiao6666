@@ -503,26 +503,65 @@ defineExpose({
   z-index: 50;
   top: calc(100% + 6px);
   inset-inline-end: 0;
-  width: max-content;
-  min-width: 208px;
+  box-sizing: border-box;
+  width: min(208px, calc(100vw - 24px));
+  min-width: min(208px, calc(100vw - 24px));
+  max-height: calc(100vh - 116px);
+  max-height: calc(100dvh - 116px);
+  overflow-y: auto;
   padding: 6px;
-  box-shadow: 0 10px 32px rgb(0 0 0 / 20%);
+  border: 1px solid color-mix(in srgb, var(--m-color-on-surface) 7%, transparent);
+  border-radius: 20px;
+  background: var(--m-color-surface-container);
+  background: color-mix(in srgb, var(--m-color-surface-container) 96%, transparent);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 18%), 0 3px 10px rgb(0 0 0 / 9%);
+  backdrop-filter: blur(22px) saturate(1.15);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.targets-menu-popup::-webkit-scrollbar {
+  display: none;
 }
 
 .targets-menu-popup :deep(.m-card) {
-  gap: 2px;
-  padding: 6px;
+  gap: 0;
+  padding: 0;
+  border-radius: inherit;
+  background: transparent;
 }
 
 .targets-menu-popup :deep(.m-button) {
   width: 100%;
-  min-height: 44px;
+  min-height: 48px;
   justify-content: flex-start;
   gap: 12px;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: 16px;
   background: transparent;
+  color: var(--m-color-on-surface);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.25;
   white-space: nowrap;
+}
+
+.targets-menu-popup :deep(.m-button:hover),
+.targets-menu-popup :deep(.m-button:focus-visible) {
+  background: color-mix(in srgb, var(--m-color-on-surface) 7%, transparent);
+}
+
+.targets-menu-popup :deep(.m-button::after) {
+  display: none;
+}
+
+.targets-menu-popup :deep(.m-button:active) {
+  background: color-mix(in srgb, var(--m-color-primary) 12%, transparent);
+}
+
+.targets-menu-popup :deep(.m-button .m-icon) {
+  flex: none;
+  color: var(--m-color-on-surface);
 }
 
 .targets-menu-enter-active,
