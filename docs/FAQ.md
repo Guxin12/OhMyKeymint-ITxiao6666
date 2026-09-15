@@ -163,7 +163,9 @@ browser. It does not change `[crypto]`, device identity, or unrelated
 configuration settings.
 
 The Home page checks every certificate serial number in the active Keybox
-against Google's attestation status list. A valid online response is cached at
+against Google's attestation status list. The validated local cache is used for
+up to 12 hours after its last successful refresh; the next check after that
+interval performs an online lookup. A valid online response is cached at
 `/data/misc/keystore/omk/data/google_attestation_status.json`; when Google is
 unreachable, the validated local cache is used, with the module's validated
 snapshot as the first-install fallback. It shows **Not revoked** when no serial

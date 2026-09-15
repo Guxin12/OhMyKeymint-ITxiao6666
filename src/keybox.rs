@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock, RwLock,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -48,6 +48,7 @@ const GOOGLE_ATTESTATION_STATUS_PATH: &str = "/attestation/status";
 const MAX_ATTESTATION_STATUS_BYTES: usize = 512 * 1024;
 const ATTESTATION_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 const ATTESTATION_STATUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GOOGLE_ATTESTATION_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 const BUNDLED_GOOGLE_ATTESTATION_STATUS: &str =
     include_str!("../template/google_attestation_status.json");
 
@@ -967,6 +968,18 @@ pub fn check_google_attestation_status(serials: &[String]) -> Result<KeyboxRevoc
         bail!("cannot check an empty certificate serial-number set");
     }
 
+    // A successful download updates the cache mtime through the atomic replace
+    // path below. Reuse a validated cache for twelve hours, then refresh it
+    // from Google on the next status check. An expired cache remains a valid
+    // offline fallback if the endpoint is unavailable.
+    if google_attestation_status_cache_is_fresh() {
+        if let Ok(status) = read_and_classify_google_attestation_status_cache(serials) {
+            info!("using the validated Google attestation status cache");
+            return Ok(status);
+        }
+        warn!("fresh Google attestation status cache failed validation; refreshing it");
+    }
+
     let online_error = match fetch_google_attestation_status() {
         Ok(contents) => match classify_google_attestation_status(&contents, serials) {
             Ok(status) => {
@@ -1012,6 +1025,23 @@ pub fn check_google_attestation_status(serials: &[String]) -> Result<KeyboxRevoc
             }
         }
     }
+}
+
+fn google_attestation_status_cache_is_fresh() -> bool {
+    let path = Path::new(GOOGLE_ATTESTATION_STATUS_CACHE_PATH);
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return false;
+    }
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    age < GOOGLE_ATTESTATION_STATUS_REFRESH_INTERVAL
 }
 
 fn fetch_google_attestation_status() -> Result<String> {

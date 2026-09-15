@@ -1,4 +1,4 @@
-import { getPackagesInfo, listPackages } from 'kernelsu-alt'
+import { exec, getPackagesInfo, listPackages } from 'kernelsu-alt'
 import type { PackagesInfo } from 'kernelsu-alt'
 import type { Config } from '../config'
 import { isValidPackageName } from '../package_name'
@@ -20,6 +20,35 @@ function afterPaint(): Promise<void> {
 
 function normalizeSearchQuery(query: string): string {
   return query.trim().toLocaleLowerCase()
+}
+
+async function queryInstalledPackages(): Promise<string[]> {
+  // ksu.listPackages() can retain the package-manager snapshot from the
+  // WebView process. Query Android's package manager directly on every fetch
+  // so apps installed while the WebUI is open appear without a cold start.
+  const commands = [
+    '/system/bin/pm list packages --user 0',
+    'cmd package list packages --user 0',
+  ]
+  for (const command of commands) {
+    try {
+      const result = await exec(command)
+      if (result.errno !== 0) continue
+      const packages = result.stdout
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line.startsWith('package:'))
+        .map(line => line.slice('package:'.length))
+        .filter(isValidPackageName)
+      if (packages.length > 0) return [...new Set(packages)].sort()
+    } catch {
+      // Try the alternate package-manager command before using the bridge.
+    }
+  }
+
+  // Keep compatibility with older KernelSU/APatch WebUI bridges that do not
+  // expose exec but do provide listPackages.
+  return listPackages('all').catch(() => [])
 }
 
 export type SelectionFilter = 'all' | 'selected' | 'unselected'
@@ -209,8 +238,7 @@ export class AppList {
     // KernelSU package APIs cross a synchronous WebView bridge. Yield before
     // each call so the navigation and progress animations can reach the screen.
     await afterPaint()
-    const rawPackages = await listPackages('all').catch(() => [])
-    const packages = [...new Set(rawPackages.filter(isValidPackageName))].sort()
+    const packages = await queryInstalledPackages()
     const installedPackages = new Set(packages)
 
     for (const packageName of this.#packageInfoCache.keys()) {
