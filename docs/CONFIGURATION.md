@@ -38,10 +38,10 @@ Both components watch their active file for valid changes. Their behavior is
 not identical:
 
 - A valid `injector.toml` is applied to new requests without a reboot.
-- A valid `config.toml` is read automatically, but only the four patch-level
-  fields and the biometric compatibility switch can take full effect without
-  restarting keymint. The field reference below states when a restart is
-  required.
+- A valid `config.toml` is read automatically. The four patch-level fields,
+  biometric compatibility switch, and three TA delay ranges can take full
+  effect without restarting keymint. The field reference below states when a
+  restart is required.
 - A malformed file saved while its component is running is rejected and the
   last valid in-memory configuration remains active.
 - A malformed `config.toml` present when keymint starts prevents keymint from
@@ -285,6 +285,11 @@ backend = "injector"
 log_level = "debug"
 # Insecure biometric compatibility switch. Keep false for normal use.
 force_skip_system_biometric_hat_verification = false
+# Extra random wait per software TA call: inclusive [minimum, maximum] in ms.
+# These defaults also apply when fields are absent; [0, 0] disables a category.
+ta_operation_delay_ms = [9, 21]
+ta_generation_delay_ms = [6, 16]
+ta_control_delay_ms = [1, 4]
 
 [crypto]
 # Redacted placeholders only. Keep the generated 64-character values.
@@ -372,6 +377,54 @@ Keep it `false` unless a maintainer is diagnosing a confirmed device-specific
 problem. It does not hide root and is not a general fix for fingerprint or
 lock-screen failures. A valid save applies to new checks without restarting
 keymint.
+
+#### TA delay ranges
+
+These three `[main]` fields configure extra random waits before OMK dispatches
+calls to its software TA:
+
+| Field | Default range (ms) | Covered TA calls |
+| --- | --- | --- |
+| `ta_operation_delay_ms` | `[9, 21]` | `begin`, `updateAad`, `update`, `finish`, `abort`, `getKeyCharacteristics` |
+| `ta_generation_delay_ms` | `[6, 16]` | `generateKey`, `importKey`, `importWrappedKey`, `upgradeKey`, `convertStorageKeyToEphemeral` |
+| `ta_control_delay_ms` | `[1, 4]` | `getHardwareInfo`, `addRngEntropy`, `deleteKey`, `deleteAllKeys`, `destroyAttestationIds`, `earlyBootEnded`, `getRootOfTrustChallenge`, `getRootOfTrust`, `sendRootOfTrust`, `setAdditionalAttestationInfo` |
+
+Each value must be an array of exactly two integers, `[minimum, maximum]`,
+with `0 <= minimum <= maximum <= 250`. Both endpoints are milliseconds and
+are inclusive. `[0, 0]` disables that category; equal nonzero endpoints request
+a fixed wait. Omitting a field enables its default range from the table.
+
+For every covered TA invocation, OMK samples a new wait uniformly at
+microsecond granularity between the configured endpoints. Calls in a category
+share the same range, but do not reuse one sample for the category or thread.
+The wait is added to processing time; it is neither a target total duration
+nor a cap. Scheduling can extend the wait beyond the selected value, and one
+app request that makes several covered TA calls accumulates their waits.
+
+The wait occurs before TA dispatch and before acquiring the TA mutex, with the
+configuration read guard released. The caller's Binder worker, RPC connection,
+per-operation concurrency guard, or database guard can remain occupied during
+the wait. Concurrent requests can therefore delay one another. A dispatched
+call receives its wait even if the TA returns an error; validation failures
+that return before TA dispatch do not. Raw TA initialization, local cache and
+authentication helpers, and calls routed to System are excluded.
+
+Valid changes apply to new TA calls without restarting keymint. A malformed
+array, non-integer value, out-of-range endpoint, or reversed range rejects the
+configuration; live reload keeps the previous valid configuration. Edit these
+fields in the existing active file while preserving its other values. OMK
+generates `config.toml` on the device; the module does not ship a reusable main
+configuration template.
+
+These waits are independent of the fixed
+[`attestation_generation_delay_ms`](#attestation_generation_delay_ms) and
+[`operation_start_delay_ms`](#operation_start_delay_ms) settings in
+`injector.toml`. An applicable nonzero injector delay is added as well. For
+example, `operation_start_delay_ms = 12` plus the default TA operation range
+adds a 12 ms wait before the RPC and a separately sampled 9-21 ms wait before
+the TA `begin` call. Set both injector delays to `0` if only the TA ranges are
+wanted. Changing software timing does not provide hardware security, constrain
+total calls to a hardware timing interval, or guarantee a detector result.
 
 ### `[crypto]`
 
@@ -670,6 +723,7 @@ empty value is valid. Its absence does not invalidate an available IMEI.
 | --- | --- |
 | `[main].log_level` | Restart keymint. |
 | `[main].force_skip_system_biometric_hat_verification` | Applies to new checks after a valid save. |
+| `[main].ta_operation_delay_ms`, `ta_generation_delay_ms`, `ta_control_delay_ms` | Apply to new TA calls after a valid save; invalid ranges retain the previous configuration. |
 | All `[crypto]` fields | Restart keymint; changing values can make keys unusable. |
 | `[trust].security_patch`, `os_patchlevel`, `vendor_patchlevel`, `boot_patchlevel` | Hot-apply as a group when no other `[trust]` field changes; otherwise restart keymint. |
 | `[trust].os_version` | Restart keymint. |
@@ -814,6 +868,7 @@ For example, `25` adds at least 25 ms to each successful challenged generation;
 scheduling can add more. The waiting Binder worker stays occupied, so many
 concurrent generations can delay unrelated callers even though the RPC
 connection and KeyMint/database locks are free. Leave it at `0` unless needed.
+This fixed wait adds to any applicable [`config.toml` TA waits](#ta-delay-ranges).
 
 Valid changes apply without a restart. Out-of-range or non-integer values
 reject the configuration; on reload, the previous valid settings remain active.
@@ -839,6 +894,7 @@ security levels, provide hardware security, or guarantee a detector result.
 Leave it at `0` unless needed. Valid changes apply without a restart.
 Out-of-range or non-integer values reject the configuration; on reload, the
 previous valid settings remain active.
+This fixed wait adds to any applicable [`config.toml` TA waits](#ta-delay-ranges).
 
 ### `[filter]`
 

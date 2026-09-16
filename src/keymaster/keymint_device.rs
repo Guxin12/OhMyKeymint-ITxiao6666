@@ -30,7 +30,7 @@ use crate::android::hardware::security::keymint::{
 use crate::android::system::keystore2::{
     Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
 };
-use crate::config::{config, Config, CryptoConfig};
+use crate::config::{config, Config, CryptoConfig, MainConfig};
 use crate::global::DB;
 use crate::keymaster::db::Uuid;
 use crate::keymaster::error::{map_km_error, map_ks_error};
@@ -65,6 +65,7 @@ use kmr_wire::keymint::{AttestationKey, KeyParam};
 use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
 use kmr_wire::*;
 use log::{error, info, warn};
+use rand::RngExt;
 use regex::Regex;
 use rsbinder::{ExceptionCode, Interface, Status, Strong};
 
@@ -593,6 +594,71 @@ fn begin_key_parameters_to_km(
     key_parameters_to_km(&filtered, version_number)
 }
 
+fn ta_delay_range(code: KeyMintOperation, main: &MainConfig) -> [u16; 2] {
+    use KeyMintOperation::*;
+    match code {
+        DeviceBegin
+        | OperationUpdateAad
+        | OperationUpdate
+        | OperationFinish
+        | OperationAbort
+        | DeviceGetKeyCharacteristics => main.ta_operation_delay_ms,
+        DeviceGenerateKey
+        | DeviceImportKey
+        | DeviceImportWrappedKey
+        | DeviceUpgradeKey
+        | DeviceConvertStorageKeyToEphemeral
+        | RpcGenerateEcdsaP256KeyPair
+        | RpcGenerateCertificateRequest
+        | RpcGenerateCertificateV2Request => main.ta_generation_delay_ms,
+        DeviceGetHardwareInfo
+        | DeviceAddRngEntropy
+        | DeviceDeleteKey
+        | DeviceDeleteAllKeys
+        | DeviceDestroyAttestationIds
+        | DeviceEarlyBootEnded
+        | GetRootOfTrustChallenge
+        | GetRootOfTrust
+        | SendRootOfTrust
+        | SetAdditionalAttestationInfo
+        | RpcGetHardwareInfo
+        | SecureClockGenerateTimeStamp => main.ta_control_delay_ms,
+        SetHalInfo
+        | SetBootInfo
+        | SetAttestationIds
+        | SetHalVersion
+        | SharedSecretGetSharedSecretParameters
+        | SharedSecretComputeSharedSecret => [0, 0],
+    }
+}
+
+fn sample_ta_delay(range: [u16; 2], rng: &mut impl rand::Rng) -> std::time::Duration {
+    // Config validation guarantees ordered endpoints in 0..=250 ms.
+    let min_us = u64::from(range[0]) * 1000;
+    let max_us = u64::from(range[1]) * 1000;
+    let micros = if min_us == max_us {
+        min_us
+    } else {
+        rng.random_range(min_us..=max_us)
+    };
+    std::time::Duration::from_micros(micros)
+}
+
+fn delay_ta_call(code: KeyMintOperation) {
+    let range = {
+        let current = config().read().unwrap();
+        ta_delay_range(code, &current.main)
+    };
+    if range == [0, 0] {
+        return;
+    }
+    let delay = sample_ta_delay(range, &mut rand::rng());
+    log::trace!("TA request {code:?}: extra delay {} us", delay.as_micros());
+    // No config or TA mutex is held here. Higher-level operation/RPC guards
+    // still serialize their callers, and existing operations remain live.
+    std::thread::sleep(delay);
+}
+
 #[allow(non_snake_case)]
 impl IKeyMintDevice for KeyMintWrapper {
     fn begin(
@@ -616,7 +682,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             })?,
         });
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result: InternalBeginResult = match result.rsp {
             Some(PerformOpRsp::DeviceBegin(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -652,6 +718,7 @@ impl IKeyMintDevice for KeyMintWrapper {
         crate::android::hardware::security::keymint::KeyMintHardwareInfo::KeyMintHardwareInfo,
         Status,
     > {
+        delay_ta_call(KeyMintOperation::DeviceGetHardwareInfo);
         let hardware_info: keymint::KeyMintHardwareInfo = self
             .inner
             .keymint
@@ -706,7 +773,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_params: key_parameters,
             attestation_key,
         });
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -751,7 +818,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             key_data: key_data.to_vec(),
             attestation_key,
         });
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceImportKey(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -785,7 +852,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             biometric_sid,
         });
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceImportWrappedKey(rsp)) => rsp.ret,
             Some(_) => {
@@ -814,7 +881,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             upgrade_params,
         });
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceUpgradeKey(rsp)) => rsp.ret,
             Some(_) => {
@@ -868,7 +935,7 @@ impl IKeyMintDevice for KeyMintWrapper {
                 storage_key_blob: storage_key_blob.to_vec(),
             });
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceConvertStorageKeyToEphemeral(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -892,7 +959,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             app_data: app_data.to_vec(),
         });
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::DeviceGetKeyCharacteristics(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -915,7 +982,7 @@ impl IKeyMintDevice for KeyMintWrapper {
     fn getRootOfTrustChallenge(&self) -> rsbinder::status::Result<[u8; 16]> {
         let req = PerformOpReq::GetRootOfTrustChallenge(GetRootOfTrustChallengeRequest {});
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::GetRootOfTrustChallenge(rsp)) => rsp.ret,
             Some(_) => {
@@ -935,7 +1002,7 @@ impl IKeyMintDevice for KeyMintWrapper {
             challenge: *challenge,
         });
 
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let result = match result.rsp {
             Some(PerformOpRsp::GetRootOfTrust(rsp)) => rsp.ret,
             Some(_) => unreachable!("Unexpected response type"),
@@ -1011,6 +1078,7 @@ impl KeyMintWrapper {
     }
 
     pub fn get_hardware_info(&self) -> Result<keymint::KeyMintHardwareInfo, Error> {
+        delay_ta_call(KeyMintOperation::DeviceGetHardwareInfo);
         self.inner
             .keymint
             .lock()
@@ -1019,14 +1087,14 @@ impl KeyMintWrapper {
             .map_err(|_| Error::Km(ErrorCode::UNKNOWN_ERROR))
     }
 
+    fn process_ta_request(&self, req: PerformOpReq) -> PerformOpResponse {
+        delay_ta_call(req.code());
+        let mut ta = self.inner.keymint.lock().unwrap();
+        ta.process_req(req)
+    }
+
     fn process_status_only(&self, req: PerformOpReq) -> Result<(), Error> {
-        let error_code = self
-            .inner
-            .keymint
-            .lock()
-            .unwrap()
-            .process_req(req)
-            .error_code;
+        let error_code = self.process_ta_request(req).error_code;
         match error_code {
             0 => Ok(()),
             _ => Err(Error::Binder(ExceptionCode::ServiceSpecific, error_code)),
@@ -1053,7 +1121,7 @@ impl KeyMintWrapper {
             auth_token: hardware_auth_token,
             timestamp_token,
         });
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let error_code = result.error_code;
         let _result: UpdateAadResponse = match result.rsp {
             Some(PerformOpRsp::OperationUpdateAad(rsp)) => rsp,
@@ -1084,7 +1152,7 @@ impl KeyMintWrapper {
             auth_token: hardware_auth_token,
             timestamp_token,
         });
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let error_code = result.error_code;
         let result: UpdateResponse = match result.rsp {
             Some(PerformOpRsp::OperationUpdate(rsp)) => rsp,
@@ -1122,7 +1190,7 @@ impl KeyMintWrapper {
             timestamp_token,
             confirmation_token,
         });
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let error_code = result.error_code;
         let result: FinishResponse = match result.rsp {
             Some(PerformOpRsp::OperationFinish(rsp)) => rsp,
@@ -1135,7 +1203,7 @@ impl KeyMintWrapper {
 
     pub fn op_abort(&self, op_handle: i64) -> Result<(), Error> {
         let req = PerformOpReq::OperationAbort(AbortRequest { op_handle });
-        let result = self.inner.keymint.lock().unwrap().process_req(req);
+        let result = self.process_ta_request(req);
         let error_code = result.error_code;
         let _result: AbortResponse = match result.rsp {
             Some(PerformOpRsp::OperationAbort(rsp)) => rsp,
@@ -1552,6 +1620,87 @@ fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<Key
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ta_delay_categories_cover_operations_and_key_lifecycle() {
+        use KeyMintOperation::*;
+        let main = MainConfig {
+            ta_operation_delay_ms: [17, 23],
+            ta_generation_delay_ms: [5, 7],
+            ta_control_delay_ms: [1, 2],
+            ..MainConfig::default()
+        };
+        for code in [
+            DeviceBegin,
+            OperationUpdateAad,
+            OperationUpdate,
+            OperationFinish,
+            OperationAbort,
+            DeviceGetKeyCharacteristics,
+        ] {
+            assert_eq!(ta_delay_range(code, &main), [17, 23], "{code:?}");
+        }
+        for code in [
+            DeviceGenerateKey,
+            DeviceImportKey,
+            DeviceImportWrappedKey,
+            DeviceUpgradeKey,
+            DeviceConvertStorageKeyToEphemeral,
+            RpcGenerateEcdsaP256KeyPair,
+            RpcGenerateCertificateRequest,
+            RpcGenerateCertificateV2Request,
+        ] {
+            assert_eq!(ta_delay_range(code, &main), [5, 7], "{code:?}");
+        }
+        for code in [
+            DeviceGetHardwareInfo,
+            DeviceAddRngEntropy,
+            DeviceDeleteKey,
+            DeviceDeleteAllKeys,
+            DeviceDestroyAttestationIds,
+            DeviceEarlyBootEnded,
+            GetRootOfTrustChallenge,
+            GetRootOfTrust,
+            SendRootOfTrust,
+            SetAdditionalAttestationInfo,
+            RpcGetHardwareInfo,
+            SecureClockGenerateTimeStamp,
+        ] {
+            assert_eq!(ta_delay_range(code, &main), [1, 2], "{code:?}");
+        }
+        for code in [
+            SetHalInfo,
+            SetBootInfo,
+            SetAttestationIds,
+            SetHalVersion,
+            SharedSecretGetSharedSecretParameters,
+            SharedSecretComputeSharedSecret,
+        ] {
+            assert_eq!(ta_delay_range(code, &main), [0, 0], "{code:?}");
+        }
+    }
+
+    #[test]
+    fn ta_delay_sampling_is_per_call_and_bounded_in_microseconds() {
+        use rand::SeedableRng;
+        use std::time::Duration;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        for range in [[0, 0], [1, 1], [250, 250]] {
+            assert_eq!(
+                sample_ta_delay(range, &mut rng),
+                Duration::from_millis(range[0].into())
+            );
+        }
+        for range in [[9, 21], [6, 16], [1, 4], [0, 250]] {
+            let samples: Vec<_> = (0..64).map(|_| sample_ta_delay(range, &mut rng)).collect();
+            assert!(samples
+                .iter()
+                .all(|value| *value >= Duration::from_millis(range[0].into())
+                    && *value <= Duration::from_millis(range[1].into())));
+            assert!(samples.windows(2).any(|pair| pair[0] != pair[1]));
+            assert!(samples.iter().any(|value| value.as_micros() % 1000 != 0));
+        }
+    }
 
     fn param(tag: Tag, value: KeyParameterValue) -> KeyParameter {
         KeyParameter { tag, value }

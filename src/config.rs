@@ -425,6 +425,7 @@ fn parse_config_file(contents: &str, allow_migration: bool) -> Result<ParsedConf
         toml::to_string_pretty(&table).context("failed to serialize migrated config.toml")?;
     let config_file: ConfigFile =
         toml::from_str(&serialized).context("failed to validate migrated config.toml")?;
+    validate_main_config(&config_file.main)?;
     validate_trust_config(&config_file.trust)?;
     Ok(ParsedConfigFile {
         config_file,
@@ -610,6 +611,19 @@ fn reload_runtime_config(trigger: WatchTrigger) {
     }
 }
 
+fn validate_main_config(main: &MainConfig) -> Result<()> {
+    for (field, [minimum, maximum]) in [
+        ("ta_operation_delay_ms", main.ta_operation_delay_ms),
+        ("ta_generation_delay_ms", main.ta_generation_delay_ms),
+        ("ta_control_delay_ms", main.ta_control_delay_ms),
+    ] {
+        if minimum > maximum || maximum > 250 {
+            bail!("main.{field} must be [minimum, maximum] with 0 <= minimum <= maximum <= 250");
+        }
+    }
+    Ok(())
+}
+
 fn validate_trust_config(trust: &RawTrustConfig) -> Result<()> {
     if let OsVersionSpec::Fixed(value) = trust.os_version {
         if !(0..=99).contains(&value) {
@@ -767,10 +781,28 @@ pub struct MainConfig {
     /// Only the injector backend is currently enabled.
     pub backend: Backend,
     pub log_level: String,
+    /// Inclusive extra delay range in milliseconds for each software TA operation call.
+    #[serde(deserialize_with = "deserialize_ta_delay_range")]
+    pub ta_operation_delay_ms: [u16; 2],
+    /// Inclusive extra delay range in milliseconds for each software TA key generation call.
+    #[serde(deserialize_with = "deserialize_ta_delay_range")]
+    pub ta_generation_delay_ms: [u16; 2],
+    /// Inclusive extra delay range in milliseconds for each software TA control call.
+    #[serde(deserialize_with = "deserialize_ta_delay_range")]
+    pub ta_control_delay_ms: [u16; 2],
     /// Insecure fallback for devices whose system TEE cannot verify HATs.
     /// When enabled, OMK accepts shape-valid HATs without system KeyMint MAC verification.
     #[serde(default)]
     pub force_skip_system_biometric_hat_verification: bool,
+}
+
+fn deserialize_ta_delay_range<'de, D>(deserializer: D) -> Result<[u16; 2], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<u16>::deserialize(deserializer)?
+        .try_into()
+        .map_err(|_| serde::de::Error::custom("TA delay range must contain exactly two integers"))
 }
 
 impl Default for MainConfig {
@@ -778,6 +810,9 @@ impl Default for MainConfig {
         Self {
             backend: Backend::Injector,
             log_level: "debug".to_string(),
+            ta_operation_delay_ms: [9, 21],
+            ta_generation_delay_ms: [6, 16],
+            ta_control_delay_ms: [1, 4],
             force_skip_system_biometric_hat_verification: false,
         }
     }
@@ -1392,6 +1427,111 @@ force_skip_system_biometric_hat_verification = true"#,
         .unwrap();
         assert!(parsed.force_skip_system_biometric_hat_verification);
         assert!(!MainConfig::default().force_skip_system_biometric_hat_verification);
+    }
+
+    #[test]
+    fn ta_delay_defaults_apply_to_existing_configs() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
+        let main = table
+            .get_mut("main")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        for field in [
+            "ta_operation_delay_ms",
+            "ta_generation_delay_ms",
+            "ta_control_delay_ms",
+        ] {
+            main.remove(field);
+        }
+        let contents = toml::to_string_pretty(&table).unwrap();
+        let parsed = parse_config_file(&contents, false).unwrap().config_file;
+        assert_eq!(parsed.main.ta_operation_delay_ms, [9, 21]);
+        assert_eq!(parsed.main.ta_generation_delay_ms, [6, 16]);
+        assert_eq!(parsed.main.ta_control_delay_ms, [1, 4]);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("config.toml");
+        fs::write(&path, contents).unwrap();
+        let bootstrapped = bootstrap_config_file_to_path(&path).unwrap();
+        assert_eq!(bootstrapped.main, parsed.main);
+        let saved = parse_config_file(&fs::read_to_string(&path).unwrap(), false)
+            .unwrap()
+            .config_file;
+        assert_eq!(saved.main, parsed.main);
+    }
+
+    #[test]
+    fn ta_delay_ranges_accept_boundaries_and_roundtrip() {
+        let mut config_file = ConfigFile::default();
+        for range in [[0, 0], [0, 250], [250, 250], [17, 17]] {
+            config_file.main.ta_operation_delay_ms = range;
+            config_file.main.ta_generation_delay_ms = range;
+            config_file.main.ta_control_delay_ms = range;
+            let serialized = toml::to_string_pretty(&config_file).unwrap();
+            let parsed = parse_config_file(&serialized, false).unwrap().config_file;
+            assert_eq!(parsed.main, config_file.main);
+        }
+    }
+
+    #[test]
+    fn ta_delay_ranges_reject_invalid_values_in_file_parser() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string_pretty(&ConfigFile::default()).unwrap()).unwrap();
+        for field in [
+            "ta_operation_delay_ms",
+            "ta_generation_delay_ms",
+            "ta_control_delay_ms",
+        ] {
+            for value in [
+                "[22, 21]",
+                "[0, 251]",
+                "[-1, 21]",
+                "[65536, 65536]",
+                "9",
+                "[]",
+                "[9]",
+                "[9, 21, 25]",
+                "[9.5, 21]",
+                r#"["9", 21]"#,
+            ] {
+                let mut assignment: toml::Table =
+                    toml::from_str(&format!("{field} = {value}")).unwrap();
+                let main = table
+                    .get_mut("main")
+                    .and_then(toml::Value::as_table_mut)
+                    .unwrap();
+                main.insert(field.to_string(), assignment.remove(field).unwrap());
+                let contents = toml::to_string_pretty(&table).unwrap();
+                assert!(
+                    parse_config_file(&contents, false).is_err(),
+                    "accepted {field} = {value}"
+                );
+            }
+            table
+                .get_mut("main")
+                .and_then(toml::Value::as_table_mut)
+                .unwrap()
+                .remove(field);
+        }
+    }
+
+    #[test]
+    fn invalid_ta_delay_is_not_persisted_or_repaired_during_bootstrap() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("config.toml");
+        let mut config_file = ConfigFile::default();
+        let valid_contents = toml::to_string_pretty(&config_file).unwrap();
+        fs::write(&path, &valid_contents).unwrap();
+
+        config_file.main.ta_operation_delay_ms = [21, 9];
+        assert!(persist_config_file_to_path(&path, &config_file).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), valid_contents);
+
+        let invalid_contents = toml::to_string_pretty(&config_file).unwrap();
+        fs::write(&path, &invalid_contents).unwrap();
+        assert!(bootstrap_config_file_to_path(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), invalid_contents);
     }
 
     #[test]

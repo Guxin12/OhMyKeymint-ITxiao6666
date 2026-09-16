@@ -36,6 +36,15 @@ The active files are `/data/misc/keystore/omk/config.toml` and
 [Configuration Guide](docs/CONFIGURATION.md) for complete annotated examples,
 field-by-field explanations, safety notes, and restart requirements.
 
+The `[main]` settings `ta_operation_delay_ms`, `ta_generation_delay_ms`, and
+`ta_control_delay_ms` in `config.toml` add a fresh random wait before each
+covered software TA call. Their default ranges are `[9, 21]`, `[6, 16]`, and
+`[1, 4]` milliseconds, including when a field is absent. Set a range to
+`[0, 0]` to disable that category. Valid changes apply to new calls without a
+restart. These are extra waits, which add to any enabled injector delays;
+they do not provide hardware security or guarantee a detector result. See
+[TA delay ranges](docs/CONFIGURATION.md#ta-delay-ranges) for coverage and limits.
+
 Optional `injector.toml` settings under `[main]` can mitigate timing-based client
 heuristics: `attestation_generation_delay_ms` delays successful challenged key
 generation replies, and `operation_start_delay_ms` delays two-way OMK
