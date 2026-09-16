@@ -700,6 +700,8 @@ scoop = [
 enabled = true
 # Injector log detail: off, error, warn, info, debug, or trace.
 log_level = "debug"
+# Optional successful challenged-generation response delay, 0..250 ms.
+attestation_generation_delay_ms = 0
 
 [filter]
 # Enforce scoop and the safety rules below.
@@ -795,6 +797,24 @@ recommended. `"debug"` is the default and the normal choice for a bug report.
 A valid file change updates the level without restarting the injector. An
 unrecognized string does not make the TOML file invalid; the injector uses
 `debug` instead.
+
+#### `attestation_generation_delay_ms`
+
+Optional timing workaround, an integer from `0` to `250` milliseconds. The
+default `0` disables it. A nonzero value delays only successful OMK
+`generateKey` replies for requests containing `ATTESTATION_CHALLENGE`, after
+the RPC and reply serialization complete. Plain generation, imports,
+operations, System requests, and error responses do not receive this delay.
+
+This can mitigate clients that classify software KeyMint by generation
+timing. It does not provide hardware security or guarantee a detector result.
+For example, `25` adds at least 25 ms to each successful challenged generation;
+scheduling can add more. The waiting Binder worker stays occupied, so many
+concurrent generations can delay unrelated callers even though the RPC
+connection and KeyMint/database locks are free. Leave it at `0` unless needed.
+
+Valid changes apply without a restart. Out-of-range or non-integer values
+reject the configuration; on reload, the previous valid settings remain active.
 
 ### `[filter]`
 

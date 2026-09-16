@@ -36,6 +36,12 @@ The active files are `/data/misc/keystore/omk/config.toml` and
 [Configuration Guide](docs/CONFIGURATION.md) for complete annotated examples,
 field-by-field explanations, safety notes, and restart requirements.
 
+An optional `injector.toml` setting, `[main].attestation_generation_delay_ms`
+(`0` by default, range `0..250`), delays successful challenged key generation
+replies to mitigate timing-based client heuristics. It adds latency and occupies
+a Binder worker; it does not provide hardware security. See the Configuration
+Guide before enabling it.
+
 In `injector.toml`, keep the `scoop = [` and closing `]` lines, then add each
 exact package name on its own line. Bare entries omit both quotes and commas;
 blank lines and lines beginning with `#` are ignored. The traditional quoted,
