@@ -18,6 +18,8 @@ enabled = true
 log_level = "debug"
 # Optional timing workaround for successful challenged generation; 0 disables it.
 attestation_generation_delay_ms = 0
+# Optional delay before two-way OMK createOperation calls, 0..250 ms; 0 disables it.
+operation_start_delay_ms = 0
 
 [filter]
 enabled = true

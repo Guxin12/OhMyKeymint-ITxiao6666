@@ -40,6 +40,7 @@ fn config_defaults_and_log_levels_match_contract() {
     let config = InjectorConfig::default();
     assert!(config.main.enabled);
     assert_eq!(config.main.attestation_generation_delay_ms, 0);
+    assert_eq!(config.main.operation_start_delay_ms, 0);
     assert_eq!(config.scoop, default_scoop());
     assert!(config.scoop_details.is_empty());
     assert_eq!(config.main.log_level_filter(), LevelFilter::Debug);
@@ -90,6 +91,54 @@ fn attestation_generation_delay_is_optional_bounded_and_preserved() {
             "[main]\nattestation_generation_delay_ms = {delay}\n"
         ))
         .is_err());
+    }
+}
+
+#[test]
+fn operation_start_delay_is_optional_bounded_and_preserved() {
+    for contents in ["", "version = 1\n[main]\nenabled = true\n"] {
+        assert_eq!(
+            parse_config(contents)
+                .unwrap()
+                .main
+                .operation_start_delay_ms,
+            0
+        );
+    }
+    for delay in [0, 12, 250] {
+        let config =
+            parse_config(&format!("[main]\noperation_start_delay_ms = {delay}\n")).unwrap();
+        let rendered = render_config(&config).unwrap();
+        assert_eq!(
+            parse_config(&rendered)
+                .unwrap()
+                .main
+                .operation_start_delay_ms,
+            delay
+        );
+    }
+    for delay in ["-1", "251", "65536", "1.5", "true", "\"12\""] {
+        assert!(parse_config(&format!("[main]\noperation_start_delay_ms = {delay}\n")).is_err());
+    }
+}
+
+#[test]
+fn invalid_operation_start_delay_reload_is_rejected_without_rewriting() {
+    let path = temp_config_path("operation-start-delay-reload");
+    fs::write(
+        &*path,
+        "version = 1\n[main]\noperation_start_delay_ms = 12\n",
+    )
+    .unwrap();
+    let loaded = load_or_seed(&path, LoadContext::Reload(WatchTrigger::CloseWrite))
+        .expect("valid delay should load");
+    assert_eq!(loaded.main.operation_start_delay_ms, 12);
+
+    for delay in ["-1", "251", "1.5", "\"12\""] {
+        let contents = format!("version = 1\n[main]\noperation_start_delay_ms = {delay}\n");
+        fs::write(&*path, &contents).unwrap();
+        assert!(load_or_seed(&path, LoadContext::Reload(WatchTrigger::CloseWrite)).is_none());
+        assert_eq!(fs::read_to_string(&*path).unwrap(), contents);
     }
 }
 

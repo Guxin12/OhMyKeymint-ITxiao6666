@@ -532,6 +532,14 @@ pub(super) fn build_omk_security_level_reply(
             operation_parameters,
             forced,
         } => {
+            let delay_ms = config::get().main.operation_start_delay_ms;
+            if publish_operation_carrier && delay_ms > 0 {
+                // Wait before creating an operation so the delay cannot leave a
+                // new operation occupying a slot before delivery. No config,
+                // RPC connection, or KeyMint/database lock is held here. The
+                // Binder worker stays occupied; even business errors are delayed.
+                std::thread::sleep(Duration::from_millis(u64::from(delay_ms)));
+            }
             let omk_response =
                 match omk_level.r#createOperation(Some(caller), key, operation_parameters, *forced)
                 {

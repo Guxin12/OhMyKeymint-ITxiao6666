@@ -702,6 +702,8 @@ enabled = true
 log_level = "debug"
 # Optional successful challenged-generation response delay, 0..250 ms.
 attestation_generation_delay_ms = 0
+# Optional delay before two-way OMK createOperation calls, 0..250 ms.
+operation_start_delay_ms = 0
 
 [filter]
 # Enforce scoop and the safety rules below.
@@ -815,6 +817,28 @@ connection and KeyMint/database locks are free. Leave it at `0` unless needed.
 
 Valid changes apply without a restart. Out-of-range or non-integer values
 reject the configuration; on reload, the previous valid settings remain active.
+
+#### `operation_start_delay_ms`
+
+Optional timing workaround, an integer from `0` to `250` milliseconds. The
+default `0` disables it. A nonzero value delays two-way OMK `createOperation`
+requests before the operation RPC starts. Both successful calls and calls that
+return OMK business errors receive this delay. One-way calls, System requests,
+and other methods do not receive this delay.
+
+For example, `12` adds at least 12 ms to each affected operation start;
+scheduling can add more. The waiting Binder worker stays occupied, so many
+concurrent calls can delay unrelated callers. Waiting occurs before creating
+the operation, without holding the RPC connection or KeyMint/database locks,
+and does not allocate an operation slot during the wait. Existing operations
+remain subject to their normal lifecycle and pruning rules.
+
+This option can mitigate clients that classify software KeyMint by operation
+timing. It does not alter permission checks, key metadata, routing, or reported
+security levels, provide hardware security, or guarantee a detector result.
+Leave it at `0` unless needed. Valid changes apply without a restart.
+Out-of-range or non-integer values reject the configuration; on reload, the
+previous valid settings remain active.
 
 ### `[filter]`
 

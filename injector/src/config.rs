@@ -37,6 +37,8 @@ pub struct MainConfig {
     pub log_level: String,
     /// Optional delay after successful challenged key generation, in milliseconds.
     pub attestation_generation_delay_ms: u16,
+    /// Optional delay before a two-way OMK createOperation call, in milliseconds.
+    pub operation_start_delay_ms: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -97,6 +99,7 @@ impl Default for MainConfig {
             enabled: true,
             log_level: "debug".to_string(),
             attestation_generation_delay_ms: 0,
+            operation_start_delay_ms: 0,
         }
     }
 }
@@ -498,6 +501,9 @@ fn parse_versioned_config(
         toml::from_str(&preprocessed).map_err(|error| error.to_string())?;
     if parsed.main.attestation_generation_delay_ms > 250 {
         return Err("main.attestation_generation_delay_ms must be in 0..=250".into());
+    }
+    if parsed.main.operation_start_delay_ms > 250 {
+        return Err("main.operation_start_delay_ms must be in 0..=250".into());
     }
     Ok((parsed.normalized(), migrated))
 }
