@@ -35,7 +35,7 @@ pub struct InjectorConfig {
 pub struct MainConfig {
     pub enabled: bool,
     pub log_level: String,
-    /// Optional delay after successful challenged key generation, in milliseconds.
+    /// Optional delay before challenged key generation, in milliseconds.
     pub attestation_generation_delay_ms: u16,
     /// Optional delay before a two-way OMK createOperation call, in milliseconds.
     pub operation_start_delay_ms: u16,
