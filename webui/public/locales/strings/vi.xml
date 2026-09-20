@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Giả mạo dấu vân tay PIF</string>
     <string name="menu_language">Ngôn ngữ</string>
     <string name="menu_more_options">Tùy chọn khác</string>
-    <string name="menu_select_all">Chọn tất cả</string>
+    <string name="menu_select_all">Chọn ứng dụng đề xuất</string>
+    <string name="menu_select_recommended_desc">Ứng dụng người dùng và dịch vụ Google; bỏ qua công cụ Root, Shizuku và Xposed đã nhận diện. Giữ nguyên lựa chọn hiện tại.</string>
     <string name="menu_deselect_all">Bỏ chọn tất cả</string>
     <string name="menu_refresh">Làm mới</string>
     <string name="prompt_saved_target">Cấu hình đã được lưu</string>

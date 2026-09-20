@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">伪装 PIF 指纹</string>
     <string name="menu_language">语言</string>
     <string name="menu_more_options">更多选项</string>
-    <string name="menu_select_all">全选</string>
+    <string name="menu_select_all">推荐选择</string>
+    <string name="menu_select_recommended_desc">选择用户应用和谷歌服务，跳过已识别的 Root、Shizuku 和 Xposed 工具。保留已有勾选。</string>
     <string name="menu_deselect_all">取消全选</string>
     <string name="menu_refresh">刷新</string>
     <string name="prompt_saved_target">配置已保存</string>

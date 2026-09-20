@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Palsukan sidik jari PIF</string>
     <string name="menu_language">Bahasa</string>
     <string name="menu_more_options">Opsi lainnya</string>
-    <string name="menu_select_all">Pilih semua</string>
+    <string name="menu_select_all">Pilih aplikasi yang disarankan</string>
+    <string name="menu_select_recommended_desc">Aplikasi pengguna dan layanan Google; lewati alat Root, Shizuku, dan Xposed yang dikenali. Pertahankan pilihan saat ini.</string>
     <string name="menu_deselect_all">Batalkan semua pilihan</string>
     <string name="menu_refresh">Segarkan</string>
     <string name="prompt_saved_target">Konfigurasi disimpan</string>

@@ -4,13 +4,33 @@ import type { Config } from '../config'
 import { isValidPackageName } from '../package_name'
 import { isDev } from '../utils/dev'
 
-const DEFAULT_VISIBLE_SYSTEM_APPS = [
+const RECOMMENDED_SYSTEM_APPS = [
   'com.google.android.gsf',
   'com.google.android.gms',
   'com.android.vending',
 ] as const
 
 const PACKAGE_INFO_BATCH_SIZE = 32
+
+// Exact identifiers only: a name containing "root" is not evidence that an app
+// is a root tool. Permission/category discovery below covers additional apps.
+const ROOT_TOOL_PACKAGES = new Set([
+  'me.weishu.kernelsu',
+  'com.rifsxd.ksunext',
+  'me.bmax.apatch',
+  'com.topjohnwu.magisk',
+  'io.github.huskydg.magisk',
+  'eu.chainfire.supersu',
+  'com.noshufou.android.su',
+  'org.lsposed.manager',
+  'de.robv.android.xposed.installer',
+  'org.meowcat.edxposed.manager',
+  'moe.shizuku.privileged.api',
+  'rikka.sui',
+  'com.tsng.hidemyapplist',
+  'org.frknkrc44.hma_oss',
+  'bin.mt.plus',
+])
 
 function afterPaint(): Promise<void> {
   return new Promise(resolve => {
@@ -22,13 +42,14 @@ function normalizeSearchQuery(query: string): string {
   return query.trim().toLocaleLowerCase()
 }
 
-async function queryInstalledPackages(): Promise<string[]> {
+async function queryInstalledPackages(type: 'all' | 'user' | 'system' = 'all'): Promise<string[]> {
   // ksu.listPackages() can retain the package-manager snapshot from the
   // WebView process. Query Android's package manager directly on every fetch
   // so apps installed while the WebUI is open appear without a cold start.
+  const filter = type === 'user' ? ' -3' : type === 'system' ? ' -s' : ''
   const commands = [
-    '/system/bin/pm list packages --user 0',
-    'cmd package list packages --user 0',
+    `/system/bin/pm list packages --user 0${filter}`,
+    `cmd package list packages --user 0${filter}`,
   ]
   for (const command of commands) {
     try {
@@ -40,7 +61,7 @@ async function queryInstalledPackages(): Promise<string[]> {
         .filter(line => line.startsWith('package:'))
         .map(line => line.slice('package:'.length))
         .filter(isValidPackageName)
-      if (packages.length > 0) return [...new Set(packages)].sort()
+      if (packages.length > 0 || result.stdout.trim() === '') return [...new Set(packages)].sort()
     } catch {
       // Try the alternate package-manager command before using the bridge.
     }
@@ -48,7 +69,7 @@ async function queryInstalledPackages(): Promise<string[]> {
 
   // Keep compatibility with older KernelSU/APatch WebUI bridges that do not
   // expose exec but do provide listPackages.
-  return listPackages('all').catch(() => [])
+  return listPackages(type)
 }
 
 export type SelectionFilter = 'all' | 'selected' | 'unselected'
@@ -75,12 +96,12 @@ export type AppListSubscriber = (snapshot: AppListSnapshot) => void
 
 export class AppList {
   readonly #config: Config
-  readonly #visibleSystemApps = new Set<string>(DEFAULT_VISIBLE_SYSTEM_APPS)
   readonly #packageInfoCache = new Map<string, PackagesInfo>()
   readonly #subscribers = new Set<AppListSubscriber>()
   #entries: AppEntry[] = []
   #revision = 0
   #fetchPromise: Promise<boolean> | null = null
+  #recommendedPackages: Promise<ReadonlySet<string>> | null = null
 
   constructor(config: Config) {
     this.#config = config
@@ -130,7 +151,7 @@ export class AppList {
     const selected = new Set(this.#config.get('target'))
     const normalizedQuery = normalizeSearchQuery(query)
     return this.#entries
-      .filter(entry => !entry.isSystem || this.#visibleSystemApps.has(entry.packageName))
+      .filter(entry => !entry.isSystem)
       .map(entry => ({ ...entry, selected: selected.has(entry.packageName) }))
       .filter(entry => this.#matches(entry, normalizedQuery, filter))
       .sort((left, right) => this.#compareEntries(left, right))
@@ -174,10 +195,18 @@ export class AppList {
     this.setSelected(packageName, !this.isSelected(packageName))
   }
 
-  selectAll(): void {
+  async selectRecommended(): Promise<void> {
+    // Discover only on explicit selection, once per package-list refresh. Never
+    // scan every installed package or issue one Binder request per app.
+    this.#recommendedPackages ??= this.#queryRecommendedPackages().catch(error => {
+      this.#recommendedPackages = null
+      throw error
+    })
+    const recommended = await this.#recommendedPackages
     const targets = new Set(this.#config.get('target'))
     let changed = false
-    for (const entry of this.getTargetEntries()) {
+    for (const entry of this.#entries) {
+      if (!recommended.has(entry.packageName)) continue
       if (targets.has(entry.packageName)) continue
       targets.add(entry.packageName)
       changed = true
@@ -203,12 +232,6 @@ export class AppList {
       )),
     )
 
-    this.#visibleSystemApps.clear()
-    for (const packageName of DEFAULT_VISIBLE_SYSTEM_APPS) {
-      this.#visibleSystemApps.add(packageName)
-    }
-    for (const packageName of checked) this.#visibleSystemApps.add(packageName)
-
     const targets = new Set(this.#config.get('target'))
     for (const packageName of installedSystemApps) {
       if (checked.has(packageName)) targets.add(packageName)
@@ -218,27 +241,20 @@ export class AppList {
     this.#emitChange()
   }
 
-  syncSystemAppsWithConfig(): void {
-    const targets = new Set(this.#config.get('target'))
-    for (const entry of this.#entries) {
-      if (entry.isSystem && targets.has(entry.packageName)) {
-        this.#visibleSystemApps.add(entry.packageName)
-      }
-    }
-    this.#emitChange()
-  }
-
   async save(): Promise<void> {
     await this.#config.write()
   }
 
   async #fetch(): Promise<boolean> {
+    this.#recommendedPackages = null
     if (isDev()) return this.#replaceEntries(this.#getDevEntries())
 
     // KernelSU package APIs cross a synchronous WebView bridge. Yield before
     // each call so the navigation and progress animations can reach the screen.
     await afterPaint()
     const packages = await queryInstalledPackages()
+    await afterPaint()
+    const systemPackages = new Set(await queryInstalledPackages('system'))
     const installedPackages = new Set(packages)
 
     for (const packageName of this.#packageInfoCache.keys()) {
@@ -268,9 +284,45 @@ export class AppList {
         appName: typeof info?.appLabel === 'string' && info.appLabel
           ? info.appLabel
           : packageName,
-        isSystem: info?.isSystem ?? false,
+        // Labels can be absent from the WebView bridge, especially for overlays.
+        // PackageManager classification remains available independently.
+        isSystem: systemPackages.has(packageName) || info?.isSystem === true,
       }
     }))
+  }
+
+  async #queryRecommendedPackages(): Promise<ReadonlySet<string>> {
+    const excluded = new Set(ROOT_TOOL_PACKAGES)
+    let userPackages: string[]
+    if (isDev()) {
+      userPackages = this.#entries.filter(entry => !entry.isSystem).map(entry => entry.packageName)
+    } else {
+      await afterPaint()
+      userPackages = await queryInstalledPackages('user')
+      // PackageManager limits this dump to users of these declared permissions;
+      // it does not request the full installed-app dump or inspect private data.
+      const commands = [
+        'dumpsys -t 8 package permission moe.shizuku.manager.permission.API_V23 moe.shizuku.manager.permission.API android.permission.ACCESS_SUPERUSER com.topjohnwu.magisk.permission.REQUEST_SU',
+        'cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c de.robv.android.xposed.category.MODULE_SETTINGS',
+      ]
+      for (const command of commands) {
+        await afterPaint()
+        const result = await exec(command)
+        if (result.errno !== 0 || /permission denial|unknown command|can't find service|error:|securityexception|dump timed out/i.test(`${result.stdout}\n${result.stderr}`)) {
+          // Leave the current selection intact when classification is unavailable.
+          throw new Error('Unable to identify app permissions for recommended selection')
+        }
+        for (const line of result.stdout.split(/\r?\n/)) {
+          const packageName = line.match(/^\s*Package \[([^\]]+)\]/)?.[1]
+            ?? line.trim().match(/^([A-Za-z][A-Za-z0-9_.]*)\//)?.[1]
+          if (packageName && isValidPackageName(packageName)) excluded.add(packageName)
+        }
+      }
+    }
+    return new Set([
+      ...userPackages.filter(packageName => !excluded.has(packageName)),
+      ...RECOMMENDED_SYSTEM_APPS,
+    ])
   }
 
   #replaceEntries(entries: AppEntry[]): boolean {
@@ -282,13 +334,6 @@ export class AppList {
     if (!changed) return false
 
     this.#entries = entries
-    const installedPackages = new Set(entries.map(entry => entry.packageName))
-    for (const packageName of this.#visibleSystemApps) {
-      if (!DEFAULT_VISIBLE_SYSTEM_APPS.includes(packageName as typeof DEFAULT_VISIBLE_SYSTEM_APPS[number])
-        && !installedPackages.has(packageName)) {
-        this.#visibleSystemApps.delete(packageName)
-      }
-    }
     this.#emitChange()
     return true
   }

@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Falsificar impressão digital do PIF</string>
     <string name="menu_language">Linguagem</string>
     <string name="menu_more_options">Mais opções</string>
-    <string name="menu_select_all">Selecionar tudo</string>
+    <string name="menu_select_all">Selecionar recomendados</string>
+    <string name="menu_select_recommended_desc">Apps do usuário e serviços Google; ignora ferramentas Root, Shizuku e Xposed reconhecidas. Mantém a seleção atual.</string>
     <string name="menu_deselect_all">Desmarcar tudo</string>
     <string name="menu_refresh">Atualizar</string>
     <string name="prompt_saved_target">Configuração salva</string>

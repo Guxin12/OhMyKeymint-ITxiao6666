@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">I-spoof ang PIF fingerprint</string>
     <string name="menu_language">Wika</string>
     <string name="menu_more_options">Higit pang opsyon</string>
-    <string name="menu_select_all">Piliin lahat</string>
+    <string name="menu_select_all">Piliin ang mga inirerekomenda</string>
+    <string name="menu_select_recommended_desc">Mga app ng user at serbisyo ng Google; laktawan ang natukoy na Root, Shizuku at Xposed tool. Panatilihin ang kasalukuyang pinili.</string>
     <string name="menu_deselect_all">Alisin ang lahat ng pagpili</string>
     <string name="menu_refresh">I-refresh</string>
     <string name="prompt_saved_target">Na-save ang config</string>

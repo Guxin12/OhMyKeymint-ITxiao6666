@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Подменить отпечаток PIF</string>
     <string name="menu_language">Язык</string>
     <string name="menu_more_options">Другие параметры</string>
-    <string name="menu_select_all">Выбрать все</string>
+    <string name="menu_select_all">Выбрать рекомендуемые</string>
+    <string name="menu_select_recommended_desc">Приложения пользователя и службы Google, кроме распознанных инструментов Root, Shizuku и Xposed. Сохраняет текущий выбор.</string>
     <string name="menu_deselect_all">Снять выделение</string>
     <string name="menu_refresh">Обновить</string>
     <string name="prompt_saved_target">Конфигурация сохранена</string>

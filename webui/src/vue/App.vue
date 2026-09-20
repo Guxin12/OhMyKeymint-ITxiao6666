@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   MiuixDialog,
   MiuixIcon,
@@ -36,6 +36,8 @@ const fileSelector = new FileSelector()
 const history = new History()
 
 const pageIndex = ref(0)
+const pageDirection = ref(1)
+const pageScrollPositions = [0, 0, 0]
 const targetsOpen = ref(false)
 const targetsLoading = ref(false)
 const snapshot = ref<AppListSnapshot>(appList.getSnapshot())
@@ -149,7 +151,10 @@ function onNavigationPointerMove(event: PointerEvent): void {
 
 function onNavigationPointerUp(event: PointerEvent): void {
   if (!navigationElement || navigationPointerId !== event.pointerId) return
-  const target = Math.round(navigationPosition(event.clientX))
+  const target = navigationWasDragged
+    ? Math.round(clampNavigationIndex(navigationPointerStartIndex
+      + (event.clientX - navigationPointerStartX) / navigationPointerSlotWidth))
+    : navigationPointerStartIndex
   navigationSuppressClick = navigationWasDragged
   navigationPointerId = null
   navigationWasDragged = false
@@ -200,7 +205,6 @@ function setPage(index: number): void {
     pageHistoryActive = false
     history.consume('main-page')
   }
-  window.scrollTo(0, 0)
 }
 
 function openTargets(): void {
@@ -264,7 +268,6 @@ async function reloadApps(readConfig: boolean): Promise<void> {
   try {
     if (readConfig) await config.read()
     await appList.fetch()
-    appList.syncSystemAppsWithConfig()
     snapshot.value = appList.getSnapshot()
     moduleStatus.value = config.isWritable ? 'ready' : 'error'
   } catch (error) {
@@ -282,7 +285,6 @@ async function saveTargets(): Promise<void> {
     await appList.save()
     snapshot.value = appList.getSnapshot()
     notify(i18n.t('prompt_saved_target'))
-    closeTargets()
   } catch (error) {
     console.error('Unable to save OMK targets:', error)
     notify(i18n.t('prompt_save_error'), true)
@@ -528,10 +530,26 @@ onBeforeUnmount(() => {
   history.destroy()
 })
 
-watch(pageIndex, index => {
+watch(pageIndex, (index, previousIndex) => {
+  pageScrollPositions[previousIndex] = window.scrollY
+  pageDirection.value = index > previousIndex ? 1 : -1
+  void nextTick(() => {
+    if (pageIndex.value === index && !targetsOpen.value) {
+      window.scrollTo(0, pageScrollPositions[index] ?? 0)
+    }
+  })
   if (navigationPointerId === null) {
     navigationElement?.style.setProperty('--omk-liquid-nav-index', String(index))
   }
+})
+
+watch(targetsOpen, open => {
+  if (open) pageScrollPositions[pageIndex.value] = window.scrollY
+  void nextTick(() => {
+    if (targetsOpen.value === open) {
+      window.scrollTo(0, open ? 0 : pageScrollPositions[pageIndex.value] ?? 0)
+    }
+  })
 })
 
 watch(pifOpen, open => {
@@ -559,60 +577,71 @@ watch(keyboxOpen, open => {
 
 <template>
   <div class="omk-app">
-    <main v-show="!targetsOpen" class="page-host">
-      <HomeView
-        v-show="pageIndex === 0"
-        :keybox-status="keyboxStatus"
-        :keybox-source="keyboxSource"
-        :keybox-level="keyboxLevel"
-        :keybox-revocation="keyboxRevocation"
-        :tee-status="teeStatus"
-        :security-patch="securityPatch"
-        :spoofed-device="spoofedDevice"
-        :activities="activities"
-        :activity-status="activityStatus"
-        :activity-clear-busy="activityClearBusy"
-        @clear-activities="clearActivities"
-      />
-      <ToolsView
-        v-show="pageIndex === 1"
-        :security-patch-busy="securityPatchBusy"
-        :adb-busy="adbBusy"
-        @open-app-targets="onTool('openAppTargets')"
-        @install-keybox="onTool('installKeybox')"
-        @sync-security-patch="onTool('syncSecurityPatch')"
-        @restore-security-patch="onTool('restoreSecurityPatch')"
-        @open-adb-disabler="onTool('openAdbDisabler')"
-        @spoof-pif="onTool('spoofPif')"
-      />
-      <SettingsView v-show="pageIndex === 2" />
+    <main v-show="!targetsOpen" class="page-host" :style="{ '--omk-page-direction': pageDirection }">
+      <Transition name="page-switch">
+        <HomeView
+          v-show="pageIndex === 0"
+          :keybox-status="keyboxStatus"
+          :keybox-source="keyboxSource"
+          :keybox-level="keyboxLevel"
+          :keybox-revocation="keyboxRevocation"
+          :tee-status="teeStatus"
+          :security-patch="securityPatch"
+          :spoofed-device="spoofedDevice"
+          :activities="activities"
+          :activity-status="activityStatus"
+          :activity-clear-busy="activityClearBusy"
+          @clear-activities="clearActivities"
+        />
+      </Transition>
+      <Transition name="page-switch">
+        <ToolsView
+          v-show="pageIndex === 1"
+          :security-patch-busy="securityPatchBusy"
+          :adb-busy="adbBusy"
+          @open-app-targets="onTool('openAppTargets')"
+          @install-keybox="onTool('installKeybox')"
+          @sync-security-patch="onTool('syncSecurityPatch')"
+          @restore-security-patch="onTool('restoreSecurityPatch')"
+          @open-adb-disabler="onTool('openAdbDisabler')"
+          @spoof-pif="onTool('spoofPif')"
+        />
+      </Transition>
+      <Transition name="page-switch">
+        <SettingsView v-show="pageIndex === 2" />
+      </Transition>
     </main>
 
-    <MiuixNavigationBar
-      v-show="!targetsOpen"
-      :model-value="pageIndex"
-      :items="navItems"
-      :data-active-index="pageIndex"
-      class="main-navigation"
-      @update:model-value="setPage"
-    >
-      <template #icon="{ index }">
-        <MiuixIcon :icon="index === 0 ? All : index === 1 ? Tune : Settings" :size="24" />
-      </template>
-    </MiuixNavigationBar>
+    <Teleport to="body">
+      <div v-show="!targetsOpen" class="navigation-dock">
+        <MiuixNavigationBar
+          :model-value="pageIndex"
+          :items="navItems"
+          :data-active-index="pageIndex"
+          class="main-navigation"
+          @update:model-value="setPage"
+        >
+          <template #icon="{ index }">
+            <MiuixIcon :icon="index === 0 ? All : index === 1 ? Tune : Settings" :size="24" />
+          </template>
+        </MiuixNavigationBar>
+      </div>
+    </Teleport>
 
-    <TargetsView
-      v-if="targetsOpen"
-      ref="targetsView"
-      :app-list="appList"
-      :loading="targetsLoading"
-      :apply-enabled="snapshot.isWritable"
-      @close="closeTargets"
-      @refresh="reloadApps(false)"
-      @apply="saveTargets"
-      @overlay-open="onTargetsOverlayOpen"
-      @overlay-close="onTargetsOverlayClose"
-    />
+    <Transition name="targets-page">
+      <TargetsView
+        v-if="targetsOpen"
+        ref="targetsView"
+        :app-list="appList"
+        :loading="targetsLoading"
+        :apply-enabled="snapshot.isWritable"
+        @close="closeTargets"
+        @refresh="reloadApps(false)"
+        @apply="saveTargets"
+        @overlay-open="onTargetsOverlayOpen"
+        @overlay-close="onTargetsOverlayClose"
+      />
+    </Transition>
 
     <FileBrowserSheet :selector="fileSelector" />
 

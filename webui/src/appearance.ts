@@ -1,4 +1,6 @@
 import { setThemeMode } from 'miuix-vue'
+import { exec, isKsuWebui } from 'kernelsu-alt'
+import { DynamicScheme, Hct, Variant, argbFromHex, hexFromArgb } from '@material/material-color-utilities'
 
 export const APPEARANCE_MODES = ['auto', 'light', 'dark', 'amoled'] as const
 export type AppearanceMode = typeof APPEARANCE_MODES[number]
@@ -49,17 +51,9 @@ export type ColorSpec = typeof COLOR_SPECS[number]
 type ResolvedMode = 'light' | 'dark'
 type AppearanceListener = () => void
 
-interface AccentPalette {
-  primary: string
-  onPrimary: string
-  primaryContainer: string
-  onPrimaryContainer: string
-}
-
 const DEFAULT_MODE: AppearanceMode = 'auto'
 type ManualAccent = Exclude<AccentColor, 'default'>
 const DEFAULT_ACCENT = 'default' as const satisfies AccentColor
-const DEFAULT_MANUAL_ACCENT: ManualAccent = 'blue'
 const DEFAULT_PALETTE_STYLE: PaletteStyle = 'TonalSpot'
 const DEFAULT_COLOR_SPEC: ColorSpec = 'SPEC_2025'
 const DEFAULT_OPTIONS: Readonly<Record<AppearanceOption, boolean>> = {
@@ -71,252 +65,112 @@ const DEFAULT_OPTIONS: Readonly<Record<AppearanceOption, boolean>> = {
 const THEME_QUERY = 'theme'
 const ACCENT_QUERY = 'accent'
 const APPEARANCE_STORAGE_KEY = 'omk-appearance'
-const ACCENT_PROPERTIES = [
-  '--m-color-primary',
-  '--m-color-on-primary',
-  '--m-color-primary-container',
-  '--m-color-on-primary-container',
-  '--m-color-secondary',
-  '--m-color-on-secondary',
-  '--m-color-secondary-container',
-  '--m-color-on-secondary-container',
-  '--m-color-tertiary-container',
-  '--m-color-on-tertiary-container',
-  '--m-color-tertiary-container-variant',
-  '--m-color-inverse-primary',
-] as const
-
-/**
- * KernelSU delegates palette generation to MaterialKolor.  The WebView build
- * does not ship that Kotlin generator, so apply the same six palette families
- * as a lightweight CSS color transform.  TonalSpot keeps the dynamic Monet
- * seed untouched; the other styles deliberately shift saturation/hue so the
- * selected style is immediately visible throughout the UI.
- */
-function styleColor(source: string, style: PaletteStyle, role: 'primary' | 'container'): string {
-  if (style === 'TonalSpot') return source
-  const mixes: Record<Exclude<PaletteStyle, 'TonalSpot'>, { color: string; primary: number; container: number }> = {
-    Neutral: { color: '#808080', primary: 46, container: 62 },
-    Vibrant: { color: '#ff2d92', primary: 22, container: 30 },
-    Expressive: { color: '#6750a4', primary: 30, container: 38 },
-    Rainbow: { color: '#00a8c6', primary: 28, container: 34 },
-    FruitSalad: { color: '#4caf50', primary: 28, container: 36 },
-  }
-  const mix = mixes[style][role]
-  return `color-mix(in srgb, ${source} ${100 - mix}%, ${mixes[style].color} ${mix}%)`
+// The same seed colors exposed by KernelSU's accent picker.
+export const ACCENT_SEEDS: Readonly<Record<ManualAccent, string>> = {
+  red: '#f44336', pink: '#e91e63', purple: '#9c27b0', deepPurple: '#673ab7',
+  indigo: '#3f51b5', blue: '#2196f3', cyan: '#00bcd4', teal: '#009688',
+  green: '#4faf50', yellow: '#ffeb3b', amber: '#ffc107', orange: '#ff9800',
+  brown: '#795548', blueGrey: '#607d8f', sakura: '#ff9ca8',
+}
+const PALETTE_VARIANTS: Record<PaletteStyle, Variant> = {
+  TonalSpot: Variant.TONAL_SPOT, Neutral: Variant.NEUTRAL,
+  Vibrant: Variant.VIBRANT, Expressive: Variant.EXPRESSIVE,
+  Rainbow: Variant.RAINBOW, FruitSalad: Variant.FRUIT_SALAD,
 }
 
-const ACCENTS: Record<ManualAccent, Record<ResolvedMode, AccentPalette>> = {
-  blue: {
-    light: {
-      primary: '#3482ff',
-      onPrimary: '#ffffff',
-      primaryContainer: '#5d9bff',
-      onPrimaryContainer: '#ffffff',
-    },
-    dark: {
-      primary: '#277af7',
-      onPrimary: '#ffffff',
-      primaryContainer: '#338fe4',
-      onPrimaryContainer: '#ffffff',
-    },
-  },
-  yellow: {
-    light: {
-      primary: '#8f4e06',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffdcc1',
-      onPrimaryContainer: '#301400',
-    },
-    dark: {
-      primary: '#ffb86c',
-      onPrimary: '#4e2600',
-      primaryContainer: '#713700',
-      onPrimaryContainer: '#ffdcc1',
-    },
-  },
-  red: {
-    light: {
-      primary: '#b3251e',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffdad6',
-      onPrimaryContainer: '#410002',
-    },
-    dark: {
-      primary: '#ffb4ab',
-      onPrimary: '#690005',
-      primaryContainer: '#93000a',
-      onPrimaryContainer: '#ffdad6',
-    },
-  },
-  purple: {
-    light: {
-      primary: '#6750a4',
-      onPrimary: '#ffffff',
-      primaryContainer: '#eaddff',
-      onPrimaryContainer: '#21005d',
-    },
-    dark: {
-      primary: '#d0bcff',
-      onPrimary: '#381e72',
-      primaryContainer: '#4f378b',
-      onPrimaryContainer: '#eaddff',
-    },
-  },
-  deepPurple: {
-    light: {
-      primary: '#5f3da8',
-      onPrimary: '#ffffff',
-      primaryContainer: '#e9ddff',
-      onPrimaryContainer: '#1e0b4f',
-    },
-    dark: {
-      primary: '#d0bcff',
-      onPrimary: '#362065',
-      primaryContainer: '#4d3780',
-      onPrimaryContainer: '#e9ddff',
-    },
-  },
-  indigo: {
-    light: {
-      primary: '#4355b9',
-      onPrimary: '#ffffff',
-      primaryContainer: '#dce2ff',
-      onPrimaryContainer: '#10174b',
-    },
-    dark: {
-      primary: '#bec6ff',
-      onPrimary: '#27337e',
-      primaryContainer: '#3d4a95',
-      onPrimaryContainer: '#dce2ff',
-    },
-  },
-  teal: {
-    light: {
-      primary: '#006a60',
-      onPrimary: '#ffffff',
-      primaryContainer: '#9ef2e5',
-      onPrimaryContainer: '#00201c',
-    },
-    dark: {
-      primary: '#80dbcf',
-      onPrimary: '#003731',
-      primaryContainer: '#005047',
-      onPrimaryContainer: '#9ef2e5',
-    },
-  },
-  amber: {
-    light: {
-      primary: '#8b5000',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffddb4',
-      onPrimaryContainer: '#2d1600',
-    },
-    dark: {
-      primary: '#ffb95f',
-      onPrimary: '#4d2600',
-      primaryContainer: '#6d3900',
-      onPrimaryContainer: '#ffddb4',
-    },
-  },
-  brown: {
-    light: {
-      primary: '#815343',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffdbce',
-      onPrimaryContainer: '#32130a',
-    },
-    dark: {
-      primary: '#ffb59f',
-      onPrimary: '#4c251a',
-      primaryContainer: '#653b2e',
-      onPrimaryContainer: '#ffdbce',
-    },
-  },
-  blueGrey: {
-    light: {
-      primary: '#4f616d',
-      onPrimary: '#ffffff',
-      primaryContainer: '#d3e5ef',
-      onPrimaryContainer: '#091e28',
-    },
-    dark: {
-      primary: '#b7cad4',
-      onPrimary: '#21333b',
-      primaryContainer: '#394b53',
-      onPrimaryContainer: '#d3e5ef',
-    },
-  },
-  sakura: {
-    light: {
-      primary: '#a23f54',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffd9df',
-      onPrimaryContainer: '#3f0717',
-    },
-    dark: {
-      primary: '#ffb2bd',
-      onPrimary: '#610f25',
-      primaryContainer: '#7f293d',
-      onPrimaryContainer: '#ffd9df',
-    },
-  },
-  green: {
-    light: {
-      primary: '#006c35',
-      onPrimary: '#ffffff',
-      primaryContainer: '#8ff7ad',
-      onPrimaryContainer: '#00210d',
-    },
-    dark: {
-      primary: '#72dc91',
-      onPrimary: '#00391a',
-      primaryContainer: '#005228',
-      onPrimaryContainer: '#8ff7ad',
-    },
-  },
-  orange: {
-    light: {
-      primary: '#9a4600',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffdbca',
-      onPrimaryContainer: '#341100',
-    },
-    dark: {
-      primary: '#ffb68d',
-      onPrimary: '#552100',
-      primaryContainer: '#793000',
-      onPrimaryContainer: '#ffdbca',
-    },
-  },
-  pink: {
-    light: {
-      primary: '#b60d6e',
-      onPrimary: '#ffffff',
-      primaryContainer: '#ffd8e9',
-      onPrimaryContainer: '#3e0022',
-    },
-    dark: {
-      primary: '#ffafd2',
-      onPrimary: '#650037',
-      primaryContainer: '#8e0050',
-      onPrimaryContainer: '#ffd8e9',
-    },
-  },
-  cyan: {
-    light: {
-      primary: '#00687c',
-      onPrimary: '#ffffff',
-      primaryContainer: '#adedff',
-      onPrimaryContainer: '#001f27',
-    },
-    dark: {
-      primary: '#55d6f2',
-      onPrimary: '#003640',
-      primaryContainer: '#004e5e',
-      onPrimaryContainer: '#adedff',
-    },
-  },
+// Read the resolved resources, including the current user's wallpaper overlays.
+// Android 14+ exposes named roles; Android 12-13 exposes the tonal palette.
+// No wallpaper files, settings writes, or persistent probe files are needed.
+const SYSTEM_COLORS_COMMAND = `
+omk_color_user="$(am get-current-user 2>/dev/null)"
+case "$omk_color_user" in ''|*[!0-9]*) exit 1 ;; esac
+for omk_color_mode in light dark; do
+  case "$omk_color_mode" in light) omk_color_tone=600 ;; dark) omk_color_tone=200 ;; esac
+  omk_color_value="$(/system/bin/cmd overlay lookup --user "$omk_color_user" android android:color/system_primary_"$omk_color_mode" 2>/dev/null)" ||
+    omk_color_value="$(/system/bin/cmd overlay lookup --user "$omk_color_user" android android:color/system_accent1_"$omk_color_tone" 2>/dev/null)"
+  printf '%s=%s\\n' "$omk_color_mode" "$omk_color_value"
+done
+`
+
+function parseSystemColors(output: string): Partial<Record<ResolvedMode, string>> {
+  const result: Partial<Record<ResolvedMode, string>> = {}
+  for (const line of output.split(/\r?\n/)) {
+    const mode = line.startsWith('light=') ? 'light' : line.startsWith('dark=') ? 'dark' : null
+    if (!mode) continue
+    const values = [...line.matchAll(/#([0-9a-f]{8}|[0-9a-f]{6})(?![0-9a-f])/gi)]
+    const value = values.at(-1)?.[1]
+    // Android prints AARRGGBB. System theme resources must be opaque.
+    if (value && (value.length === 6 || value.slice(0, 2).toLowerCase() === 'ff')) {
+      result[mode] = '#' + value.slice(-6).toLowerCase()
+    }
+  }
+  return result
+}
+
+// Adapted from MIUIX MonetMapping.kt (Apache-2.0). MIUIX secondary is an
+// inactive control fill (outlineVariant), not the Material secondary accent.
+function monetTokens(seed: string, dark: boolean, style: PaletteStyle, spec: ColorSpec): Record<string, string> {
+  const scheme = new DynamicScheme({
+    sourceColorHct: Hct.fromInt(argbFromHex(seed)),
+    variant: PALETTE_VARIANTS[style],
+    isDark: dark,
+    contrastLevel: 0,
+    platform: 'phone',
+    specVersion: spec === 'SPEC_2025' ? '2025' : '2021',
+  })
+  const mix = (foreground: number, alpha: number, background: number): string => {
+    const channel = (shift: number) => Math.round(
+      ((foreground >>> shift) & 255) * alpha + ((background >>> shift) & 255) * (1 - alpha),
+    )
+    return hexFromArgb((255 << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0))
+  }
+  const surface = scheme.surface
+  const disabledPrimary = mix(scheme.primary, 0.38, surface)
+  const disabledSecondary = mix(scheme.outlineVariant, 0.5, surface)
+  const disabledSecondaryVariant = mix(scheme.surfaceContainerHigh, 0.6, surface)
+  const roles: Record<string, number | string> = {
+    primary: scheme.primary, 'on-primary': scheme.onPrimary,
+    'primary-variant': scheme.primaryFixed, 'on-primary-variant': scheme.onPrimaryFixed,
+    error: scheme.error, 'on-error': scheme.onError,
+    'error-container': scheme.errorContainer, 'on-error-container': scheme.onErrorContainer,
+    'primary-container': scheme.primaryContainer, 'on-primary-container': scheme.onPrimaryContainer,
+    'disabled-primary': disabledPrimary,
+    'disabled-on-primary': mix(scheme.onPrimary, 0.38, argbFromHex(disabledPrimary)),
+    'disabled-primary-button': disabledPrimary,
+    'disabled-on-primary-button': mix(scheme.onPrimary, 0.6, argbFromHex(disabledPrimary)),
+    'disabled-primary-slider': disabledPrimary,
+    secondary: scheme.outlineVariant, 'on-secondary': scheme.outline,
+    'secondary-variant': scheme.surfaceContainerHigh, 'on-secondary-variant': scheme.onSurface,
+    'disabled-secondary': disabledSecondary,
+    'disabled-on-secondary': mix(scheme.onSurface, 0.38, argbFromHex(disabledSecondary)),
+    'disabled-secondary-variant': disabledSecondaryVariant,
+    'disabled-on-secondary-variant': mix(scheme.onSurface, 0.38, argbFromHex(disabledSecondaryVariant)),
+    'secondary-container': scheme.secondaryContainer, 'on-secondary-container': scheme.onSecondaryContainer,
+    'secondary-container-variant': scheme.surfaceContainerHighest,
+    'on-secondary-container-variant': scheme.onSurfaceVariant,
+    'tertiary-container': scheme.tertiaryContainer, 'on-tertiary-container': scheme.onTertiaryContainer,
+    'tertiary-container-variant': scheme.onTertiaryContainer,
+    background: scheme.background, 'on-background': scheme.onBackground,
+    'on-background-variant': scheme.primary,
+    surface, 'on-surface': scheme.onSurface, 'surface-variant': scheme.surfaceVariant,
+    'on-surface-secondary': mix(scheme.onSurface, 0.8, surface),
+    'on-surface-variant-summary': scheme.onSurfaceVariant,
+    'on-surface-variant-actions': scheme.onSurfaceVariant,
+    'disabled-on-surface': scheme.onSurface,
+    'surface-container': scheme.surfaceContainer, 'on-surface-container': scheme.onSurface,
+    'on-surface-container-variant': scheme.onSurfaceVariant,
+    'surface-container-high': scheme.surfaceContainerHigh,
+    'on-surface-container-high': mix(scheme.onSurface, 0.8, scheme.surfaceContainerHigh),
+    'surface-container-highest': scheme.surfaceContainerHighest,
+    'on-surface-container-highest': scheme.onSurface,
+    outline: scheme.outline, 'divider-line': scheme.outlineVariant,
+    'window-dimming': dark ? 'rgb(0 0 0 / 60%)' : 'rgb(0 0 0 / 30%)',
+    'slider-key-point': scheme.primary, 'slider-key-point-foreground': scheme.surfaceContainerHigh,
+    'slider-background': mix(scheme.primary, 0.2, surface),
+  }
+  return Object.fromEntries(Object.entries(roles).map(([role, color]) => [
+    '--m-color-' + role, typeof color === 'number' ? hexFromArgb(color) : color,
+  ]))
 }
 
 function isAppearanceMode(value: string | null): value is AppearanceMode {
@@ -338,6 +192,12 @@ export class AppearanceController {
   #interfaceScale = 100
   #systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
   #listeners: AppearanceListener[] = []
+  #systemColors: Partial<Record<ResolvedMode, string>> = {}
+  #colorRefresh: Promise<void> | null = null
+  #lastColorRefresh = 0
+  #paletteKey = ''
+  #palette: Record<string, string> = {}
+  #appliedTokens: string[] = []
 
   constructor() {
     const url = new URL(window.location.href)
@@ -359,11 +219,77 @@ export class AppearanceController {
     }
     if (this.#options.liquidGlass) this.#options.floatingBottomBar = true
     this.#systemTheme.addEventListener('change', () => {
-      if (this.#mode !== 'auto') return
       this.#apply()
       this.#emit()
+      void this.refreshSystemColors()
+    })
+    window.addEventListener('focus', () => { void this.refreshSystemColors() })
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void this.refreshSystemColors()
     })
     this.#apply()
+    void this.refreshSystemColors()
+  }
+
+  async refreshSystemColors(): Promise<void> {
+    if (!isKsuWebui()) return
+    if (this.#colorRefresh) return this.#colorRefresh
+    if (Date.now() - this.#lastColorRefresh < 1000) return
+    this.#lastColorRefresh = Date.now()
+    this.#colorRefresh = (async () => {
+      const hostBars = this.#refreshHostBarColor()
+      try {
+        if (!this.#options.monet || this.#accent !== DEFAULT_ACCENT) return
+        const result = await exec(SYSTEM_COLORS_COMMAND)
+        if (result.errno !== 0) return
+        const colors = parseSystemColors(result.stdout)
+        if (!colors.light && !colors.dark) return
+        this.#systemColors = { ...this.#systemColors, ...colors }
+        this.#apply()
+        this.#emit()
+      } catch (error) {
+        console.warn('Unable to read Android dynamic colors:', error)
+      } finally {
+        await hostBars
+      }
+    })()
+    try {
+      await this.#colorRefresh
+    } finally {
+      this.#colorRefresh = null
+    }
+  }
+
+  async #refreshHostBarColor(): Promise<void> {
+    // KernelSU owns the native bar icons and exports its active surface here.
+    // Use its surface only when the host and WebUI light/dark modes differ.
+    // Matching modes can extend the WebUI surface into the safe areas.
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 2000)
+    let surface: string | undefined
+    try {
+      const response = await fetch('/internal/colors.css', {
+        cache: 'no-store', signal: controller.signal,
+      })
+      if (response.ok) {
+        const css = await response.text()
+        // MonetColorsProvider uses CSS RRGGBB/RRGGBBAA, not Android AARRGGBB.
+        const value = css.match(/(?:^|[;{])\s*--surface\s*:\s*(#[0-9a-f]{6}(?:ff)?)\s*;/i)?.[1]
+        if (value) surface = value.slice(0, 7)
+      }
+    } catch {
+      // Keep the CSS prefers-color-scheme fallback for unsupported hosts.
+    } finally {
+      window.clearTimeout(timer)
+    }
+    const root = document.documentElement
+    if (surface) {
+      root.style.setProperty('--omk-host-bar-background', surface)
+      root.dataset.hostTheme = Hct.fromInt(argbFromHex(surface)).tone >= 50 ? 'light' : 'dark'
+    } else {
+      root.style.removeProperty('--omk-host-bar-background')
+      delete root.dataset.hostTheme
+    }
   }
 
   get mode(): AppearanceMode {
@@ -400,6 +326,7 @@ export class AppearanceController {
     this.#syncUrl()
     this.#apply()
     this.#emit()
+    void this.refreshSystemColors()
   }
 
   setAccent(accent: AccentColor): void {
@@ -410,6 +337,7 @@ export class AppearanceController {
     this.#syncUrl()
     this.#apply()
     this.#emit()
+    void this.refreshSystemColors()
   }
 
   setPaletteStyle(style: PaletteStyle): void {
@@ -441,6 +369,7 @@ export class AppearanceController {
     this.#syncUrl()
     this.#apply()
     this.#emit()
+    void this.refreshSystemColors()
   }
 
   onChange(listener: AppearanceListener): () => void {
@@ -533,53 +462,32 @@ export class AppearanceController {
     root.style.setProperty('--omk-ui-scale', String(this.#interfaceScale / 100))
     root.style.colorScheme = resolved
 
-    for (const property of ACCENT_PROPERTIES) root.style.removeProperty(property)
-    if (this.#options.monet && this.#accent === DEFAULT_ACCENT) {
-      const fallback = ACCENTS.blue[resolved]
-      const dynamicPrimary = `var(--primary, ${fallback.primary})`
-      const dynamicContainer = `var(--primaryContainer, ${fallback.primaryContainer})`
-      const values: Record<(typeof ACCENT_PROPERTIES)[number], string> = {
-        '--m-color-primary': styleColor(dynamicPrimary, this.#paletteStyle, 'primary'),
-        '--m-color-on-primary': `var(--onPrimary, ${fallback.onPrimary})`,
-        '--m-color-primary-container': styleColor(dynamicContainer, this.#paletteStyle, 'container'),
-        '--m-color-on-primary-container': `var(--onPrimaryContainer, ${fallback.onPrimaryContainer})`,
-        '--m-color-secondary': styleColor(`var(--secondary, ${fallback.primary})`, this.#paletteStyle, 'primary'),
-        '--m-color-on-secondary': `var(--onSecondary, ${fallback.onPrimary})`,
-        '--m-color-secondary-container': styleColor(`var(--secondaryContainer, ${fallback.primaryContainer})`, this.#paletteStyle, 'container'),
-        '--m-color-on-secondary-container': `var(--onSecondaryContainer, ${fallback.onPrimaryContainer})`,
-        '--m-color-tertiary-container': styleColor(`var(--tertiaryContainer, ${fallback.primaryContainer})`, this.#paletteStyle, 'container'),
-        '--m-color-on-tertiary-container': `var(--onTertiaryContainer, ${fallback.onPrimaryContainer})`,
-        '--m-color-tertiary-container-variant': styleColor(`var(--tertiaryContainer, ${fallback.primaryContainer})`, this.#paletteStyle, 'container'),
-        '--m-color-inverse-primary': styleColor(`var(--inversePrimary, ${fallback.primary})`, this.#paletteStyle, 'primary'),
-      }
-      for (const [property, value] of Object.entries(values)) root.style.setProperty(property, value)
-      return
+    for (const property of this.#appliedTokens) root.style.removeProperty(property)
+    this.#appliedTokens = []
+    const seed = this.#accent === DEFAULT_ACCENT
+      ? this.#systemColors[resolved] : ACCENT_SEEDS[this.#accent]
+    root.dataset.monetSource = !this.#options.monet ? 'disabled'
+      : this.#accent !== DEFAULT_ACCENT ? 'custom' : seed ? 'system' : 'unavailable'
+    delete root.dataset.monetSeed
+    // A failed/unsupported system query keeps the static MIUIX palette rather
+    // than presenting a hardcoded color as wallpaper-derived Monet.
+    if (!this.#options.monet || !seed) return
+    root.dataset.monetSeed = seed
+    const key = [seed, resolved, this.#paletteStyle, this.#colorSpec].join(':')
+    if (key !== this.#paletteKey) {
+      this.#palette = monetTokens(seed, resolved === 'dark', this.#paletteStyle, this.#colorSpec)
+      this.#paletteKey = key
     }
-    // A manually selected accent is a Monet seed and only applies while
-    // dynamic Monet colors are enabled.  Disabling Monet must restore the
-    // default static palette instead of leaving the previously selected
-    // custom color active.
-    const selectedAccent: ManualAccent = this.#options.monet && this.#accent !== DEFAULT_ACCENT
-      ? this.#accent
-      : DEFAULT_MANUAL_ACCENT
-    const palette = ACCENTS[selectedAccent][resolved]
-    const primary = styleColor(palette.primary, this.#paletteStyle, 'primary')
-    const container = styleColor(palette.primaryContainer, this.#paletteStyle, 'container')
-    const values: Record<(typeof ACCENT_PROPERTIES)[number], string> = {
-      '--m-color-primary': primary,
-      '--m-color-on-primary': palette.onPrimary,
-      '--m-color-primary-container': container,
-      '--m-color-on-primary-container': palette.onPrimaryContainer,
-      '--m-color-secondary': primary,
-      '--m-color-on-secondary': palette.onPrimary,
-      '--m-color-secondary-container': container,
-      '--m-color-on-secondary-container': palette.onPrimaryContainer,
-      '--m-color-tertiary-container': container,
-      '--m-color-on-tertiary-container': palette.onPrimaryContainer,
-      '--m-color-tertiary-container-variant': container,
-      '--m-color-inverse-primary': primary,
+    const tokens = { ...this.#palette }
+    if (this.#mode === 'amoled') {
+      Object.assign(tokens, {
+        '--m-color-background': '#000000', '--m-color-surface': '#000000',
+        '--m-color-surface-variant': '#101010', '--m-color-surface-container': '#101010',
+        '--m-color-surface-container-high': '#171717', '--m-color-surface-container-highest': '#202020',
+      })
     }
-    for (const [property, value] of Object.entries(values)) root.style.setProperty(property, value)
+    for (const [property, value] of Object.entries(tokens)) root.style.setProperty(property, value)
+    this.#appliedTokens = Object.keys(tokens)
   }
 
   #emit(): void {

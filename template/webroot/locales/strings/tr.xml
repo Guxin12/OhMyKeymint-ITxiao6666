@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">PIF parmak izini taklit et</string>
     <string name="menu_language">Dil</string>
     <string name="menu_more_options">Diğer seçenekler</string>
-    <string name="menu_select_all">Tümünü seç</string>
+    <string name="menu_select_all">Önerilen uygulamaları seç</string>
+    <string name="menu_select_recommended_desc">Kullanıcı uygulamaları ve Google hizmetleri; tanınan Root, Shizuku ve Xposed araçlarını atlar. Mevcut seçimleri korur.</string>
     <string name="menu_deselect_all">Tüm seçimi kaldır</string>
     <string name="menu_refresh">Yenile</string>
     <string name="prompt_saved_target">Yapılandırma kaydedildi</string>

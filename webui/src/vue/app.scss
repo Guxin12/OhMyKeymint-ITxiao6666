@@ -1,33 +1,24 @@
 // Component anatomy, typography, interaction and motion come from miuix-vue.
 // These overrides connect the existing appearance preferences and page layout.
 :root {
-  --m-color-primary: #3482ff;
-  --m-color-on-primary: #fff;
-  --m-color-primary-variant: var(--m-color-primary);
-  --m-color-on-primary-variant: #aecdff;
-  --m-color-primary-container: #5d9bff;
-  --m-color-on-primary-container: #fff;
-  --m-color-disabled-primary: var(--m-color-primary-container);
-  --m-color-disabled-on-primary: var(--m-color-on-primary-container);
-  --m-color-disabled-primary-button: var(--m-color-primary-container);
-  --m-color-disabled-on-primary-button: var(--m-color-on-primary-container);
-  --m-color-disabled-primary-slider: var(--m-color-primary-container);
-  --m-color-tertiary-container: var(--m-color-primary-container);
-  --m-color-on-tertiary-container: var(--m-color-on-primary-container);
-  --m-color-tertiary-container-variant: var(--m-color-primary-container);
   --m-text-main-size: 17px;
   --m-text-body1-size: 16px;
   --m-text-body2-size: 14px;
   --m-text-button-size: 17px;
   --m-text-subtitle-size: 14px;
   --m-text-title4-size: 18px;
-  --m-color-slider-key-point-foreground: var(--m-color-primary);
   --omk-top-inset: var(--window-inset-top, env(safe-area-inset-top, 0px));
   --omk-bottom-inset: var(--window-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --m-snackbar-inset-bottom: var(--omk-bottom-inset);
   --omk-left-inset: var(--window-inset-left, env(safe-area-inset-left, 0px));
   --omk-right-inset: var(--window-inset-right, env(safe-area-inset-right, 0px));
   --omk-nav-height: 64px;
+  --omk-nav-bottom: var(--omk-bottom-inset);
+  --omk-nav-clearance: calc(var(--omk-nav-height) + (var(--omk-nav-bottom) + 12px) / var(--omk-ui-scale));
   --omk-bar-background: rgb(247 247 247 / 82%);
+  --omk-top-bar-fill: var(--m-color-surface);
+  --omk-system-bar-background: var(--m-color-surface);
+  --omk-host-bar-background: #f7f7f7;
   --omk-glass-background: rgb(255 255 255 / 54%);
   --omk-identity-mix: 42%;
   --omk-activity-mix: 24%;
@@ -35,13 +26,23 @@
   --omk-ui-scale: 1;
 }
 
-/* Palette families mirror KernelSU's selectable Monet styles.  They tune the
- * tonal amount applied to cards while keeping the MIUIX surface tokens intact. */
-:root[data-palette-style='Neutral'] { --omk-identity-mix: 22%; --omk-activity-mix: 14%; --omk-preference-mix: 14%; }
-:root[data-palette-style='Vibrant'] { --omk-identity-mix: 58%; --omk-activity-mix: 34%; --omk-preference-mix: 34%; }
-:root[data-palette-style='Expressive'] { --omk-identity-mix: 50%; --omk-activity-mix: 30%; --omk-preference-mix: 30%; }
-:root[data-palette-style='Rainbow'],
-:root[data-palette-style='FruitSalad'] { --omk-identity-mix: 46%; --omk-activity-mix: 28%; --omk-preference-mix: 28%; }
+// Extend the page's surface to the screen edges. Native bar icons belong to
+// the host, so use its surface only when its light/dark mode differs from ours.
+:root[data-host-theme='light'][data-theme-resolved='dark'],
+:root[data-host-theme='dark'][data-theme-resolved='light'] {
+  --omk-system-bar-background: var(--omk-host-bar-background);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-host-theme])[data-theme-resolved='dark'] {
+    --omk-system-bar-background: var(--omk-host-bar-background);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  :root { --omk-host-bar-background: #000; }
+  :root:not([data-host-theme])[data-theme-resolved='light'] {
+    --omk-system-bar-background: var(--omk-host-bar-background);
+  }
+}
 
 :root.m-theme-dark {
   --omk-bar-background: rgb(0 0 0 / 78%);
@@ -106,6 +107,7 @@ html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
+.m-bottom-sheet__inner { padding-bottom: var(--omk-bottom-inset); }
 .m-bottom-sheet__content::-webkit-scrollbar,
 .m-dialog__content::-webkit-scrollbar {
   display: none;
@@ -174,19 +176,74 @@ body {
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   -webkit-tap-highlight-color: transparent;
 }
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  z-index: 1300;
+  left: 0;
+  right: 0;
+  background: var(--omk-system-bar-background);
+  pointer-events: none;
+}
+body::before { top: 0; height: var(--omk-top-inset); }
+body::after { bottom: 0; height: var(--omk-bottom-inset); }
 button, input, textarea { font: inherit; }
 button { touch-action: manipulation; }
 .omk-app {
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: calc(100vh / var(--omk-ui-scale));
+  min-height: calc(100dvh / var(--omk-ui-scale));
   zoom: var(--omk-ui-scale, 1);
-  padding: var(--omk-top-inset) var(--omk-right-inset)
-    calc(var(--omk-nav-height) + var(--omk-bottom-inset) + 12px) var(--omk-left-inset);
+  padding: 0 calc(var(--omk-right-inset) / var(--omk-ui-scale))
+    var(--omk-nav-clearance) calc(var(--omk-left-inset) / var(--omk-ui-scale));
 }
-.page-host { min-height: calc(100vh - var(--omk-nav-height)); }
+.page-host {
+  position: relative;
+  /* Clip entering pages without creating a nested scroll container. Android
+   * WebView otherwise includes the translated edge in its viewport sizing. */
+  overflow-x: clip;
+  min-height: calc(100vh / var(--omk-ui-scale) - var(--omk-nav-clearance));
+  min-height: calc(100dvh / var(--omk-ui-scale) - var(--omk-nav-clearance));
+  /* Per-page scroll restoration must not be shifted again when a leaving
+   * panel is removed from layout at the end of its transition. */
+  overflow-anchor: none;
+}
 .app-page, .settings-view { width: min(100%, 720px); margin: 0 auto; }
-.app-page { padding: 0 12px 16px; }
-.m-top-app-bar { position: sticky; top: var(--omk-top-inset); z-index: 10; background: var(--m-color-surface); }
+.app-page { --omk-page-side: 12px; padding: 0 var(--omk-page-side) 16px; }
+.m-top-app-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding-top: calc(var(--omk-top-inset) / var(--omk-ui-scale));
+  /* MIUIX supplies an inline solid background; all bars share this surface. */
+  background: var(--omk-top-bar-fill) !important;
+}
+.app-page > .m-top-app-bar {
+  width: calc(100% + var(--omk-page-side) * 2);
+  margin-inline: calc(-1 * var(--omk-page-side));
+}
+.m-top-app-bar::before,
+.targets-top-bar::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: calc(var(--omk-top-inset) / var(--omk-ui-scale));
+  background: var(--omk-system-bar-background);
+  pointer-events: none;
+}
+.targets-top-bar .m-top-app-bar {
+  position: static;
+  padding-top: 0;
+  background: transparent !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+.targets-top-bar .m-top-app-bar::before { content: none; }
+.page-switch-enter-active { transition: opacity 180ms ease-out, transform 220ms cubic-bezier(.2, .8, .2, 1); }
+.page-switch-leave-active { display: none !important; }
+.page-switch-enter-from { opacity: 0; transform: translate3d(calc(var(--omk-page-direction) * 12px), 0, 0); }
+.targets-page-enter-active { transition: opacity 160ms ease-out, transform 220ms cubic-bezier(.2, .8, .2, 1); }
+.targets-page-enter-from { opacity: 0; transform: translate3d(0, 8px, 0); }
 .m-basic-component__title { font-size: 16px; line-height: 1.3; }
 .m-basic-component__summary { font-size: 14px; line-height: 1.35; }
 .m-arrow-preference__title, .m-checkbox-preference__title, .m-switch-preference__title { font-size: 16px; line-height: 1.3; }
@@ -232,7 +289,7 @@ button { touch-action: manipulation; }
   font-weight: inherit;
 }
 [data-tone='loading'] { opacity: .7; }
-.home-page .m-top-app-bar__title { align-items: flex-start; width: 100%; padding-inline: 4px; text-align: start; }
+.home-page .m-top-app-bar__title { align-items: flex-start; width: 100%; padding-inline: var(--omk-page-side); text-align: start; }
 .home-page .m-top-app-bar__title .m-text { font-size: clamp(20px, 5.3vw, 24px); line-height: 1.2; }
 .activity-card { margin-top: 12px; }
 .activity-card > .m-card { padding: 10px 4px 12px; }
@@ -259,7 +316,10 @@ button { touch-action: manipulation; }
 .activity-toggle.m-button { width: calc(100% - 20px); margin: 4px 10px 0; color: var(--m-color-primary); }
 .activity-empty { min-height: 120px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--m-color-on-surface-variant-summary); }
 .preference-section { margin-top: 4px; }
+.preference-section > .m-small-title,
+.settings-section > .m-small-title { padding: 10px 19px 8px; }
 .preference-card .m-basic-component { min-height: 70px; }
+.preference-card .m-basic-component__center > .m-text--headline1 { font-size: 16px; line-height: 1.3; }
 .preference-card > .m-card {
   background: var(--m-color-primary-container);
   background: color-mix(
@@ -286,24 +346,61 @@ button { touch-action: manipulation; }
 
 :root[data-monet='false'][data-floating-bottom-bar='true']
   .main-navigation .m-navigation-bar__item--selected {
-  background: var(--m-color-surface-container-high);
   color: var(--m-color-on-surface);
 }
+:root[data-monet='false'][data-floating-bottom-bar='true'] .main-navigation {
+  --omk-nav-indicator-fill: var(--m-color-surface-container-high);
+}
 .preference-icon { display: inline-flex; width: 28px; align-items: center; justify-content: center; color: var(--m-color-primary); }
-.main-navigation {
+.navigation-dock {
+  /* Keep the viewport anchor outside the zoomed page and its compositing
+   * layers. Only the inner MIUIX bar participates in scaling/glass motion. */
   position: fixed;
   z-index: 80;
   right: var(--omk-right-inset);
   bottom: 0;
   left: var(--omk-left-inset);
-  width: auto;
+  display: flex;
+  justify-content: center;
+  overflow-x: clip;
   padding-bottom: var(--omk-bottom-inset);
+  pointer-events: none;
+}
+.main-navigation {
+  --omk-nav-indicator-fill: var(--m-color-tertiary-container);
+  position: relative;
+  flex: none;
+  width: calc(100% / var(--omk-ui-scale));
+  transform: scale(var(--omk-ui-scale));
+  transform-origin: center bottom;
+  pointer-events: auto;
   background: var(--m-color-surface);
 }
-.main-navigation .m-navigation-bar__row { max-width: 720px; margin-inline: auto; }
-.main-navigation .m-navigation-bar__item { min-width: 0; }
+.main-navigation .m-navigation-bar__row { position: relative; max-width: 720px; margin-inline: auto; }
+.main-navigation .m-navigation-bar__item { position: relative; min-width: 0; transition: color 180ms ease, opacity 180ms ease, transform 180ms cubic-bezier(.2, .8, .2, 1); }
+.main-navigation .m-navigation-bar__item:active { transform: scale(.94); }
+.main-navigation .m-navigation-bar__icon { transition: transform 220ms cubic-bezier(.2, .8, .2, 1); }
+.main-navigation .m-navigation-bar__item--selected .m-navigation-bar__icon { transform: translateY(-1px); }
+.main-navigation .m-navigation-bar__row::before {
+  content: '';
+  position: absolute;
+  top: 7px;
+  left: 0;
+  width: calc(100% / 3);
+  height: 30px;
+  background: radial-gradient(ellipse 26px 15px at center, var(--m-color-tertiary-container) 96%, transparent 100%);
+  transform: translate3d(calc(var(--omk-liquid-nav-index, 0) * 100%), 0, 0);
+  transition: transform 240ms cubic-bezier(.2, .8, .2, 1);
+  pointer-events: none;
+}
 .main-navigation .m-navigation-bar__item--selected { color: var(--m-color-primary); }
 .main-navigation .m-navigation-bar__label { max-width: 100%; padding-inline: 4px; line-height: 1.25; }
+:root[data-bar-blur='true'] {
+  --omk-top-bar-fill: var(--omk-bar-background);
+}
+@supports (background: color-mix(in srgb, white, transparent)) {
+  :root[data-bar-blur='true'] { --omk-top-bar-fill: color-mix(in srgb, var(--m-color-surface) 78%, transparent); }
+}
 :root[data-bar-blur='true'] .m-top-app-bar,
 :root[data-bar-blur='true'] .main-navigation {
   /* A translucent layer is required for backdrop-filter to reveal the page
@@ -314,24 +411,36 @@ button { touch-action: manipulation; }
   -webkit-backdrop-filter: blur(22px) saturate(1.2);
   backdrop-filter: blur(22px) saturate(1.2);
 }
-:root[data-floating-bottom-bar='true'] { --omk-nav-height: 92px; }
+:root[data-floating-bottom-bar='true'] {
+  --omk-nav-bottom: max(28px, calc(var(--omk-bottom-inset) + 8px));
+}
+:root[data-floating-bottom-bar='true'] .navigation-dock {
+  bottom: var(--omk-nav-bottom);
+  padding-bottom: 0;
+}
 :root[data-floating-bottom-bar='true'] .main-navigation {
-  left: 50%;
-  right: auto;
-  bottom: max(28px, calc(var(--omk-bottom-inset) + 8px));
+  flex: none;
   width: 236px;
   height: 64px;
   padding: 4px;
-  transform: translateX(-50%);
   border-radius: 32px;
   background: var(--m-color-surface-container);
   box-shadow: 0 0 10px rgb(0 0 0 / 10%);
 }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-divider { display: none; }
+:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__row::before {
+  top: 0;
+  height: 56px;
+  border-radius: 28px;
+  background: var(--omk-nav-indicator-fill);
+}
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item { height: 56px; border-radius: 28px; opacity: 1; }
-:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item--selected { background: var(--m-color-tertiary-container); color: var(--m-color-on-tertiary-container); }
+:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item--selected { background: transparent; color: var(--m-color-on-tertiary-container); }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__icon { margin-top: 4px; }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__label { font-size: 11px; margin-bottom: 4px; }
+:root[data-bar-blur='true'][data-floating-bottom-bar='true'] .main-navigation {
+  background: var(--omk-top-bar-fill);
+}
 :root[data-liquid-glass='true'] .main-navigation {
   overflow: hidden;
   background: var(--omk-glass-background);
@@ -340,9 +449,11 @@ button { touch-action: manipulation; }
   backdrop-filter: blur(22px) saturate(1.35);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%), 0 3px 16px rgb(0 0 0 / 16%);
 }
+:root[data-liquid-glass='true'] { --omk-top-bar-fill: var(--omk-glass-background); }
+@supports (background: color-mix(in srgb, white, transparent)) {
+  :root[data-liquid-glass='true'] { --omk-top-bar-fill: color-mix(in srgb, var(--m-color-surface) 58%, transparent); }
+}
 :root[data-liquid-glass='true'] .m-top-app-bar {
-  background: var(--omk-glass-background);
-  background: color-mix(in srgb, var(--m-color-surface) 58%, transparent);
   -webkit-backdrop-filter: blur(22px) saturate(1.35);
   backdrop-filter: blur(22px) saturate(1.35);
   box-shadow: inset 0 -1px 0 rgb(255 255 255 / 12%);
@@ -375,7 +486,7 @@ button { touch-action: manipulation; }
   -webkit-backdrop-filter: blur(22px) saturate(1.35);
   backdrop-filter: blur(22px) saturate(1.35);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%), 0 3px 16px rgb(0 0 0 / 16%);
-  transform: translate3d(calc(-50% + var(--omk-liquid-nav-panel-offset)), 0, 0);
+  transform: translate3d(var(--omk-liquid-nav-panel-offset), 0, 0) scale(var(--omk-ui-scale));
   transition: transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
   will-change: transform;
 }
@@ -426,6 +537,8 @@ button { touch-action: manipulation; }
   position: relative;
   z-index: 1;
 }
+:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
+  .main-navigation .m-navigation-bar__row::before { display: none; }
 
 :root[data-floating-bottom-bar='true'][data-liquid-glass='true']
   .main-navigation .m-navigation-bar__item {
@@ -485,13 +598,16 @@ button { touch-action: manipulation; }
   padding-top: 6px;
   background: var(--m-color-background);
 }
-.targets-view { min-height: 100vh; min-height: 100dvh; }
+.targets-view {
+  min-height: calc(100vh / var(--omk-ui-scale));
+  min-height: calc(100dvh / var(--omk-ui-scale));
+}
 @media (max-width: 430px) {
   .identity-grid { gap: 8px; }
   .identity-card > .m-card { padding: 12px; }
 }
 @media (max-width: 360px) {
-  .app-page { padding-inline: 10px; }
+  .app-page { --omk-page-side: 10px; }
   .identity-card > .m-card { padding: 10px; }
   .identity-field strong { font-size: 13px; }
   .identity-field--primary strong { font-size: 12px; }

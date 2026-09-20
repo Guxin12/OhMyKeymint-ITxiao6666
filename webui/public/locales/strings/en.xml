@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Spoof PIF fingerprint</string>
     <string name="menu_language">Language</string>
     <string name="menu_more_options">More options</string>
-    <string name="menu_select_all">Select all</string>
+    <string name="menu_select_all">Select recommended apps</string>
+    <string name="menu_select_recommended_desc">User apps and Google services; skip recognized Root, Shizuku and Xposed tools. Keep existing selections.</string>
     <string name="menu_deselect_all">Deselect all</string>
     <string name="menu_refresh">Refresh</string>
     <string name="prompt_saved_target">Config saved</string>

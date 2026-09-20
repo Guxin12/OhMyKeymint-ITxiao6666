@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Usurper l'empreinte PIF</string>
     <string name="menu_language">Langue</string>
     <string name="menu_more_options">Plus d'options</string>
-    <string name="menu_select_all">Tout sélectionner</string>
+    <string name="menu_select_all">Sélection recommandée</string>
+    <string name="menu_select_recommended_desc">Apps utilisateur et services Google, sauf les outils Root, Shizuku et Xposed reconnus. Conserve les sélections actuelles.</string>
     <string name="menu_deselect_all">Tout désélectionner</string>
     <string name="menu_refresh">Actualiser</string>
     <string name="prompt_saved_target">Configuration enregistrée</string>

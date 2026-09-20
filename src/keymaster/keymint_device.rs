@@ -1618,7 +1618,7 @@ fn shared_keymint_wrapper_inner(security_level: SecurityLevel) -> Result<Arc<Key
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1875,7 +1875,7 @@ mod tests {
         }
     }
 
-    fn test_ta() -> KeyMintTa {
+    pub(crate) fn test_ta() -> KeyMintTa {
         let hw_info = HardwareInfo {
             version_number: KeyMintDevice::KEY_MINT_V5,
             security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
@@ -1910,7 +1910,7 @@ mod tests {
         )
     }
 
-    fn set_boot_info(ta: &mut KeyMintTa) -> i32 {
+    pub(crate) fn set_boot_info(ta: &mut KeyMintTa) -> i32 {
         ta.process_req(PerformOpReq::SetBootInfo(kmr_wire::SetBootInfoRequest {
             verified_boot_state: 0,
             verified_boot_hash: vec![0; 32],

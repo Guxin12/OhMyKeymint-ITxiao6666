@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">PIF barmaq izini saxtalaşdır</string>
     <string name="menu_language">Dil</string>
     <string name="menu_more_options">Daha çox seçim</string>
-    <string name="menu_select_all">Hamısını seç</string>
+    <string name="menu_select_all">Tövsiyə edilənləri seç</string>
+    <string name="menu_select_recommended_desc">İstifadəçi tətbiqləri və Google xidmətləri; tanınmış Root, Shizuku və Xposed alətləri istisna edilir. Mövcud seçimlər saxlanılır.</string>
     <string name="menu_deselect_all">Hamısının seçimini ləğv et</string>
     <string name="menu_refresh">Yenilə</string>
     <string name="prompt_saved_target">Konfiqurasiya yadda saxlanıldı</string>

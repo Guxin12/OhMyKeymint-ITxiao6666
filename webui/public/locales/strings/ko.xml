@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">PIF 지문 위장</string>
     <string name="menu_language">언어</string>
     <string name="menu_more_options">기타 옵션</string>
-    <string name="menu_select_all">모두 선택</string>
+    <string name="menu_select_all">추천 앱 선택</string>
+    <string name="menu_select_recommended_desc">사용자 앱과 Google 서비스를 선택하고 확인된 Root, Shizuku, Xposed 도구는 제외합니다. 기존 선택은 유지합니다.</string>
     <string name="menu_deselect_all">모두 선택 해제</string>
     <string name="menu_refresh">새로고침</string>
     <string name="prompt_saved_target">설정이 저장되었습니다</string>

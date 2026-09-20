@@ -10,13 +10,13 @@ import {
   MiuixSmallTitle,
   MiuixSpinnerPreference,
   MiuixSwitchPreference,
-  MiuixTabRow,
   MiuixTopAppBar,
   type MiuixDropdownItem,
 } from 'miuix-vue'
 import { Background, Layers, Sidebar, Theme, Translate, Tune } from 'miuix-vue/icons'
 import {
   ACCENT_COLORS,
+  ACCENT_SEEDS,
   APPEARANCE_MODES,
   COLOR_SPECS,
   PALETTE_STYLES,
@@ -62,22 +62,8 @@ const ACCENT_CHOICES: readonly Choice<AccentColor>[] = [
 ]
 
 const ACCENT_SWATCHES: Readonly<Record<AccentColor, string>> = {
+  ...ACCENT_SEEDS,
   default: 'var(--m-color-primary)',
-  red: '#d93025',
-  pink: '#d81b60',
-  purple: '#8e24aa',
-  deepPurple: '#673ab7',
-  indigo: '#3f51b5',
-  blue: '#1976d2',
-  cyan: '#0097a7',
-  teal: '#00897b',
-  green: '#2e7d32',
-  yellow: '#f9a825',
-  amber: '#ff8f00',
-  orange: '#ef6c00',
-  brown: '#795548',
-  blueGrey: '#546e7a',
-  sakura: '#e5739a',
 }
 
 function translate(key: string, fallback: string): string {
@@ -85,7 +71,7 @@ function translate(key: string, fallback: string): string {
   return value === key ? fallback : value
 }
 
-const modeTabs = computed<string[]>(() => MODE_CHOICES.map(choice => translate(choice.labelKey, choice.fallback)))
+const modeItems = computed<string[]>(() => MODE_CHOICES.map(choice => translate(choice.labelKey, choice.fallback)))
 const languageCodes = ['default', ...Object.keys(i18n.languages)]
 const languageItems = computed<string[]>(() => [
   translate('settings_language_auto', 'Follow system language'),
@@ -188,16 +174,15 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
           :text="translate('settings_language', 'Language')"
         />
         <MiuixCard class="settings-card settings-card--single" press-feedback="none">
-          <MiuixDropdownPreference
-            :model-value="languageIndex"
-            :title="translate('settings_language', 'Language')"
-            :items="languageItems"
-            @update:model-value="selectLanguage"
-          >
-            <template #start>
-              <span class="settings-preference-icon"><MiuixIcon :icon="Translate" :size="22" /></span>
-            </template>
-          </MiuixDropdownPreference>
+          <div class="settings-dropdown">
+            <span class="settings-preference-icon" aria-hidden="true"><MiuixIcon :icon="Translate" :size="22" /></span>
+            <MiuixDropdownPreference
+              :model-value="languageIndex"
+              :title="translate('settings_language', 'Language')"
+              :items="languageItems"
+              @update:model-value="selectLanguage"
+            />
+          </div>
         </MiuixCard>
       </section>
 
@@ -207,16 +192,12 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
           :text="translate('settings_appearance', 'Appearance')"
         />
         <MiuixCard class="settings-card" press-feedback="none">
-          <div class="mode-preference">
-            <div class="preference-leading">
-              <span class="settings-preference-icon"><MiuixIcon :icon="Theme" :size="22" /></span>
-              <span class="mode-preference-title">{{ translate('settings_mode', 'Mode') }}</span>
-            </div>
-            <MiuixTabRow
-              contour
+          <div class="settings-dropdown">
+            <span class="settings-preference-icon" aria-hidden="true"><MiuixIcon :icon="Theme" :size="22" /></span>
+            <MiuixDropdownPreference
               :model-value="modeIndex"
-              :tabs="modeTabs"
-              :aria-label="translate('settings_mode', 'Mode')"
+              :title="translate('settings_mode', 'Mode')"
+              :items="modeItems"
               @update:model-value="selectMode"
             />
           </div>
@@ -240,42 +221,39 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
           <template v-if="options.monet">
             <div class="settings-divider"><MiuixDivider /></div>
 
-            <MiuixSpinnerPreference
-              :model-value="accentIndex"
-              :title="translate('settings_color', 'Accent color')"
-              :items="accentItems"
-              @update:model-value="selectAccent"
-            >
-              <template #start>
-                <span class="settings-preference-icon"><MiuixIcon :icon="Tune" :size="22" /></span>
-              </template>
-            </MiuixSpinnerPreference>
+            <div class="settings-dropdown">
+              <span class="settings-preference-icon" aria-hidden="true"><MiuixIcon :icon="Tune" :size="22" /></span>
+              <MiuixSpinnerPreference
+                :model-value="accentIndex"
+                :title="translate('settings_color', 'Accent color')"
+                :items="accentItems"
+                @update:model-value="selectAccent"
+              />
+            </div>
 
             <div class="settings-divider"><MiuixDivider /></div>
 
-            <MiuixDropdownPreference
-              :model-value="paletteStyleIndex"
-              :title="translate('settings_color_style', 'Color style')"
-              :items="paletteStyleItems"
-              @update:model-value="selectPaletteStyle"
-            >
-              <template #start>
-                <span class="settings-preference-icon"><MiuixIcon :icon="Tune" :size="22" /></span>
-              </template>
-            </MiuixDropdownPreference>
+            <div class="settings-dropdown">
+              <span class="settings-preference-icon" aria-hidden="true"><MiuixIcon :icon="Tune" :size="22" /></span>
+              <MiuixDropdownPreference
+                :model-value="paletteStyleIndex"
+                :title="translate('settings_color_style', 'Color style')"
+                :items="paletteStyleItems"
+                @update:model-value="selectPaletteStyle"
+              />
+            </div>
 
             <div class="settings-divider"><MiuixDivider /></div>
 
-            <MiuixDropdownPreference
-              :model-value="colorSpecIndex"
-              :title="translate('settings_color_spec', 'Color standard')"
-              :items="colorSpecItems"
-              @update:model-value="selectColorSpec"
-            >
-              <template #start>
-                <span class="settings-preference-icon"><MiuixIcon :icon="Tune" :size="22" /></span>
-              </template>
-            </MiuixDropdownPreference>
+            <div class="settings-dropdown">
+              <span class="settings-preference-icon" aria-hidden="true"><MiuixIcon :icon="Tune" :size="22" /></span>
+              <MiuixDropdownPreference
+                :model-value="colorSpecIndex"
+                :title="translate('settings_color_spec', 'Color standard')"
+                :items="colorSpecItems"
+                @update:model-value="selectColorSpec"
+              />
+            </div>
           </template>
         </MiuixCard>
       </section>
@@ -379,10 +357,6 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
   color: var(--m-color-on-background);
 }
 
-.settings-view :deep(.m-top-app-bar) {
-  background: transparent;
-}
-
 .settings-view :deep(.m-top-app-bar__row) {
   min-height: 64px;
 }
@@ -423,19 +397,6 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
   min-height: 68px;
 }
 
-.mode-preference {
-  box-sizing: border-box;
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-}
-
-.preference-leading {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .settings-preference-icon {
   display: inline-flex;
   flex: 0 0 28px;
@@ -445,48 +406,22 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
   color: var(--m-color-on-surface-variant-summary);
 }
 
-.mode-preference-title {
-  display: block;
-  color: var(--m-color-on-surface);
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 1.3;
+/* miuix-vue 0.1.1 dropdowns do not forward the start slot. Keep their
+ * native picker and reserve the same leading space as other preferences. */
+.settings-dropdown { position: relative; }
+.settings-dropdown > .settings-preference-icon {
+  position: absolute;
+  z-index: 1;
+  inset-inline-start: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
-
-.mode-preference :deep(.m-tab-row) {
-  background: transparent;
-}
-
-.mode-preference :deep(.m-tab-row__scroll) {
-  background: var(--m-color-surface-container-high);
-  background: color-mix(
-    in srgb,
-    var(--m-color-primary-container) 18%,
-    var(--m-color-surface-container-high)
-  );
-  min-height: 48px;
-  border-radius: 24px;
-}
-
-.mode-preference :deep(.m-tab-row__indicator) {
-  background: color-mix(in srgb, var(--m-color-primary) 16%, var(--m-color-surface-container));
-  box-shadow: 0 2px 5px rgb(0 0 0 / 9%);
-  border-radius: 20px;
-}
-
-.mode-preference :deep(.m-tab-row__item--selected) {
-  color: var(--m-color-on-surface);
-  font-weight: 600;
-}
-
-:global(:root.m-theme-dark) .mode-preference :deep(.m-tab-row__indicator) {
-  background: var(--m-color-surface-container-highest);
-  background: color-mix(
-    in srgb,
-    var(--m-color-surface-container-highest) 92%,
-    var(--m-color-on-surface)
-  );
-  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+.settings-card .settings-dropdown :deep(.m-basic-component) { padding-inline-start: 56px; }
+.settings-dropdown :deep(.m-basic-component__end) { max-width: 55%; }
+.settings-dropdown :deep(.m-dropdown-preference__value) {
+  overflow-wrap: anywhere;
+  text-align: end;
 }
 
 .settings-divider {
@@ -503,13 +438,13 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
   margin-inline-end: 4px;
 }
 
-.settings-card :deep(.m-basic-component__title) {
+.settings-card :deep(.m-basic-component__center > .m-text--headline1) {
   font-size: 16px;
   font-weight: 600;
   line-height: 1.3;
 }
 
-.settings-card :deep(.m-basic-component__summary) {
+.settings-card :deep(.m-basic-component__center > .m-text--body2) {
   margin-top: 3px;
   font-size: 14px;
   line-height: 1.35;
@@ -562,10 +497,6 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
   .settings-content {
     padding-inline: 10px;
     padding-bottom: 22px;
-  }
-
-  .mode-preference {
-    padding: 12px 12px 14px;
   }
 
   .settings-divider {

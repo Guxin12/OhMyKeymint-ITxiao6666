@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Simula l'impronta PIF</string>
     <string name="menu_language">Lingua</string>
     <string name="menu_more_options">Altre opzioni</string>
-    <string name="menu_select_all">Seleziona tutto</string>
+    <string name="menu_select_all">Seleziona app consigliate</string>
+    <string name="menu_select_recommended_desc">App utente e servizi Google; esclude gli strumenti Root, Shizuku e Xposed riconosciuti. Mantiene le selezioni esistenti.</string>
     <string name="menu_deselect_all">Deseleziona tutto</string>
     <string name="menu_refresh">Aggiorna</string>
     <string name="prompt_saved_target">Configurazione salvata</string>

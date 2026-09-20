@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import { enableEdgeToEdge, isKsuWebui } from 'kernelsu-alt'
 import 'miuix-vue/style.css'
 import { isSupported, renderBlockingPage } from './webview/webview'
 import App from './vue/App.vue'
@@ -10,6 +11,10 @@ if (!isSupported()) {
   root.replaceChildren(renderBlockingPage())
 } else {
   try {
+    if (isKsuWebui()) {
+      // Older hosts enable this when insets.css loads; retain that fallback.
+      await enableEdgeToEdge(true).catch(() => {})
+    }
     await i18n.init()
     createApp(App).mount(root)
   } catch (error) {

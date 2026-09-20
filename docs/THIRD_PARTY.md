@@ -9,6 +9,17 @@ navigation bar, top app bar, cards, preferences, sheets, dialogs, progress
 indicators, and icons; application behavior and native bridge calls remain in
 the Oh My Keymint source.
 
+## Monet color generation
+
+The WebUI bundles Google's [Material Color Utilities](https://github.com/material-foundation/material-color-utilities),
+version `0.4.0`, under the Apache License 2.0. It supplies HCT palette generation
+and the 2021/2025 color specifications; UI components remain miuix-vue.
+The MIUIX role mapping in `webui/src/appearance.ts` is adapted from
+[compose-miuix-ui/miuix MonetMapping.kt](https://github.com/compose-miuix-ui/miuix/blob/26b37993ce6073ac7cab9b986ab57352c126dc81/miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/MonetMapping.kt),
+copyright 2025 compose-miuix-ui contributors, licensed under Apache-2.0.
+System seed selection and the accent choices follow
+[KernelSU's theme implementation](https://github.com/tiann/KernelSU/tree/85cab5f841b55bed180c10dfdbe33f876aba7820/manager/app/src/main/java/me/weishu/kernelsu/ui/theme).
+
 ## Tricky Addon - Update Target List
 
 The embedded Oh My Keymint WebUI contains adapted source from

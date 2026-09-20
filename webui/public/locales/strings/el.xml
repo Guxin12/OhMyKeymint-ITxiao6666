@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">Παραποίηση αποτυπώματος PIF</string>
     <string name="menu_language">Γλώσσα</string>
     <string name="menu_more_options">Περισσότερες επιλογές</string>
-    <string name="menu_select_all">Επιλογή όλων</string>
+    <string name="menu_select_all">Επιλογή προτεινόμενων</string>
+    <string name="menu_select_recommended_desc">Εφαρμογές χρήστη και υπηρεσίες Google, εκτός αναγνωρισμένων εργαλείων Root, Shizuku και Xposed. Διατηρούνται οι υπάρχουσες επιλογές.</string>
     <string name="menu_deselect_all">Κατάργηση επιλογής όλων</string>
     <string name="menu_refresh">Ανανέωση</string>
     <string name="prompt_saved_target">Η διαμόρφωση αποθηκεύτηκε</string>

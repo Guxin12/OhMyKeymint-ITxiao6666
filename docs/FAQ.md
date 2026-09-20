@@ -197,7 +197,17 @@ If loading, parsing, validation, or writing fails, the WebUI reports the error
 and the existing file is not replaced. Saving is unavailable when the current
 list could not be loaded. The package selector refreshes installed apps when it
 opens and when the WebUI returns to the foreground, while preserving unsaved
-selections.
+selections. A successful save keeps the package selector open.
+
+**Select recommended apps** adds installed user apps and the three core Google
+packages (Google Play services, Google Play Store, and Google Services Framework).
+It skips recognized Root managers, Shizuku clients, and Xposed tools using exact
+package identifiers, declared permissions, and the Xposed settings category.
+Unknown or renamed tools without these markers may still require manual adjustment.
+Existing selections are preserved, including manually selected tools. Other system
+apps remain available through **Add System App**. Recommendation only changes the
+pending selection; **Apply** writes it to `scoop`. This is OMK backend routing,
+not a general-purpose root-hiding list.
 
 ### Where are the active settings?
 
@@ -367,7 +377,11 @@ one algorithm uses its sole key to sign all attestation leaf certificates,
 including leaves whose public key uses the other algorithm.
 
 RKP-extracted keyboxes are legitimately EC-only and do not need an added RSA
-entry. The file must also be clean XML, without watermarks, comments inserted
+entry. RSA-only keyboxes are also supported without an added EC entry. RSA
+private keys can use unencrypted PKCS#1 (`RSA PRIVATE KEY`) or PKCS#8
+(`PRIVATE KEY`) PEM encoding. Both encodings use the same keybox identity when
+the private key and certificate chain are unchanged; XML export uses PKCS#1.
+The file must also be clean XML, without watermarks, comments inserted
 into key data, invisible characters, or other extra content.
 
 A file working in another module does not prove that it is valid. Some other

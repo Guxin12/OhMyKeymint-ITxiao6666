@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">PIF-Fingerabdruck vortäuschen</string>
     <string name="menu_language">Sprache</string>
     <string name="menu_more_options">Weitere Optionen</string>
-    <string name="menu_select_all">Alle auswählen</string>
+    <string name="menu_select_all">Empfohlene Apps auswählen</string>
+    <string name="menu_select_recommended_desc">Nutzer-Apps und Google-Dienste; erkannte Root-, Shizuku- und Xposed-Tools auslassen. Bestehende Auswahl behalten.</string>
     <string name="menu_deselect_all">Auswahl aufheben</string>
     <string name="menu_refresh">Aktualisieren</string>
     <string name="prompt_saved_target">Konfiguration gespeichert</string>

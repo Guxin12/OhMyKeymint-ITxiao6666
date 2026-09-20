@@ -13,6 +13,7 @@ import {
   MiuixSearchBar,
   MiuixTabRow,
   MiuixTopAppBar,
+  showSnackbar,
 } from 'miuix-vue'
 import {
   AddCircle,
@@ -70,6 +71,7 @@ const searchQuery = ref('')
 const searchExpanded = ref(false)
 const filterIndex = ref(0)
 const menuOpen = ref(false)
+const selectingRecommended = ref(false)
 const systemSheetOpen = ref(false)
 const systemSearchQuery = ref('')
 const systemSelection = ref(new Set<string>())
@@ -152,13 +154,26 @@ function setIconState(packageName: string, state: IconState): void {
 }
 
 function setSelected(entry: SelectableAppEntry, selected: boolean): void {
-  if (props.loading || menuOpen.value) return
+  if (props.loading || menuOpen.value || selectingRecommended.value) return
   props.appList.setSelected(entry.packageName, selected)
 }
 
-function selectAll(): void {
-  menuOpen.value = false
-  props.appList.selectAll()
+async function selectRecommended(): Promise<void> {
+  if (props.loading || selectingRecommended.value) return
+  selectingRecommended.value = true
+  try {
+    await props.appList.selectRecommended()
+    menuOpen.value = false
+  } catch (error) {
+    console.error('Unable to select recommended apps:', error)
+    void showSnackbar({
+      message: translate('prompt_load_error', 'Unable to load apps. Please refresh and try again.'),
+      duration: 'long',
+      withDismissAction: true,
+    })
+  } finally {
+    selectingRecommended.value = false
+  }
 }
 
 function deselectAll(): void {
@@ -172,7 +187,7 @@ function refresh(): void {
 }
 
 function apply(): void {
-  if (!props.loading && props.applyEnabled) emit('apply')
+  if (!props.loading && !selectingRecommended.value && props.applyEnabled) emit('apply')
 }
 
 function focusSearch(): void {
@@ -226,7 +241,7 @@ onBeforeUnmount(() => {
 
 defineExpose({
   focusSearch,
-  selectAll,
+  selectRecommended,
   deselectAll,
   refresh,
   apply,
@@ -268,19 +283,23 @@ defineExpose({
 
             <Transition name="targets-menu">
               <MiuixCard v-if="menuOpen" class="targets-menu-popup" role="menu">
-                <MiuixButton role="menuitem" @click="selectAll">
-                  <MiuixIcon :icon="SelectAll" :size="21" />
-                  <span>{{ translate('menu_select_all', 'Select all') }}</span>
+                <MiuixButton role="menuitem" :disabled="loading || selectingRecommended" @click="selectRecommended">
+                  <MiuixProgressIndicator v-if="selectingRecommended" type="circular" :size="21" />
+                  <MiuixIcon v-else :icon="SelectAll" :size="21" />
+                  <span class="targets-menu-label">
+                    <span>{{ translate('menu_select_all', 'Select recommended apps') }}</span>
+                    <small>{{ translate('menu_select_recommended_desc', 'User apps and Google services; skip recognized Root, Shizuku and Xposed tools. Keep existing selections.') }}</small>
+                  </span>
                 </MiuixButton>
-                <MiuixButton role="menuitem" @click="deselectAll">
+                <MiuixButton role="menuitem" :disabled="selectingRecommended" @click="deselectAll">
                   <MiuixIcon :icon="Clear" :size="21" />
                   <span>{{ translate('menu_deselect_all', 'Deselect all') }}</span>
                 </MiuixButton>
-                <MiuixButton role="menuitem" :disabled="loading" @click="refresh">
+                <MiuixButton role="menuitem" :disabled="loading || selectingRecommended" @click="refresh">
                   <MiuixIcon :icon="Refresh" :size="21" />
                   <span>{{ translate('menu_refresh', 'Refresh') }}</span>
                 </MiuixButton>
-                <MiuixButton role="menuitem" @click="openSystemApps">
+                <MiuixButton role="menuitem" :disabled="loading || selectingRecommended" @click="openSystemApps">
                   <MiuixIcon :icon="AddCircle" :size="21" />
                   <span>{{ translate('menu_add_system_app', 'Add System App') }}</span>
                 </MiuixButton>
@@ -318,9 +337,10 @@ defineExpose({
       <MiuixCard v-else-if="targetEntries.length > 0" class="targets-list">
         <MiuixCheckboxPreference
           v-for="entry in renderedTargetEntries"
-          v-memo="[entry.selected, entry.appName, iconState(entry.packageName)]"
+          v-memo="[entry.selected, entry.appName, iconState(entry.packageName), selectingRecommended]"
           :key="entry.packageName"
           :model-value="entry.selected"
+          :disabled="selectingRecommended"
           :title="entry.appName"
           :summary="entry.packageName"
           location="end"
@@ -361,7 +381,7 @@ defineExpose({
 
     <MiuixFloatingActionButton
       class="targets-apply"
-      :disabled="loading || !applyEnabled"
+      :disabled="loading || selectingRecommended || !applyEnabled"
       :aria-label="translate('functional_button_apply', 'Apply')"
       :title="translate('functional_button_apply', 'Apply')"
       @click="apply"
@@ -465,7 +485,7 @@ defineExpose({
   z-index: 40;
   top: 0;
   box-sizing: border-box;
-  padding-top: env(safe-area-inset-top, 0);
+  padding-top: calc(var(--omk-top-inset) / var(--omk-ui-scale));
   /* Keep a solid fallback for older Android WebViews that do not implement
      CSS color-mix; the translucent value is then layered on when supported. */
   background: var(--m-color-surface);
@@ -474,13 +494,13 @@ defineExpose({
 }
 
 .targets-top-bar :deep(.m-top-app-bar__nav) {
-  padding-inline-start: max(8px, env(safe-area-inset-left, 0));
+  padding-inline-start: 8px;
   padding-inline-end: 0;
 }
 
 .targets-top-bar :deep(.m-top-app-bar__actions) {
   padding-inline-start: 0;
-  padding-inline-end: max(8px, env(safe-area-inset-right, 0));
+  padding-inline-end: 8px;
 }
 
 .targets-menu {
@@ -504,8 +524,8 @@ defineExpose({
   top: calc(100% + 6px);
   inset-inline-end: 0;
   box-sizing: border-box;
-  width: min(208px, calc(100vw - 24px));
-  min-width: min(208px, calc(100vw - 24px));
+  width: min(296px, calc(100vw - 24px));
+  min-width: min(296px, calc(100vw - 24px));
   max-height: calc(100vh - 116px);
   max-height: calc(100dvh - 116px);
   overflow-y: auto;
@@ -543,7 +563,21 @@ defineExpose({
   font-size: 17px;
   font-weight: 400;
   line-height: 1.25;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: start;
+}
+
+.targets-menu-label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.targets-menu-label small {
+  color: var(--m-color-on-surface-variant-summary);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
 }
 
 .targets-menu-popup :deep(.m-button:hover),
@@ -597,7 +631,7 @@ defineExpose({
   width: min(100%, 680px);
   min-height: 240px;
   margin: 0 auto;
-  padding: 8px 12px calc(96px + env(safe-area-inset-bottom, 0));
+  padding: 8px 12px calc(96px + var(--omk-bottom-inset) / var(--omk-ui-scale));
 }
 
 .targets-list,
@@ -697,14 +731,20 @@ defineExpose({
 .targets-apply {
   position: fixed;
   z-index: 30;
-  inset-inline-end: max(20px, calc(env(safe-area-inset-right, 0) + 14px));
-  bottom: max(20px, calc(env(safe-area-inset-bottom, 0) + 14px));
+  right: calc(20px + var(--omk-right-inset) / var(--omk-ui-scale));
+  bottom: calc(14px + var(--omk-bottom-inset) / var(--omk-ui-scale));
+}
+
+[dir='rtl'] .targets-apply {
+  right: auto;
+  left: calc(20px + var(--omk-left-inset) / var(--omk-ui-scale));
 }
 
 .system-app-sheet {
   box-sizing: border-box;
   min-height: min(65vh, 520px);
-  padding-bottom: max(18px, env(safe-area-inset-bottom, 0));
+  /* The teleported MIUIX sheet already reserves the system gesture area. */
+  padding-bottom: 18px;
 }
 
 .system-app-sheet > :deep(.m-search-bar) {

@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">انتحال بصمة PIF</string>
     <string name="menu_language">اللغة</string>
     <string name="menu_more_options">المزيد من الخيارات</string>
-    <string name="menu_select_all">تحديد الكل</string>
+    <string name="menu_select_all">تحديد التطبيقات المقترحة</string>
+    <string name="menu_select_recommended_desc">تطبيقات المستخدم وخدمات Google، باستثناء أدوات Root وShizuku وXposed المعروفة. الاحتفاظ بالتحديدات الحالية.</string>
     <string name="menu_deselect_all">إلغاء تحديد الكل</string>
     <string name="menu_refresh">تحديث</string>
     <string name="prompt_saved_target">تم حفظ الإعدادات</string>

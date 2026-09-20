@@ -69,14 +69,43 @@ reapplies the selected settings at boot. Open it from the Oh My Keymint module p
 KernelSU. With Magisk, open an installed KSUWebUIStandalone or WebUI X host and
 select Oh My Keymint; the module does not install either host.
 
+The main package picker shows user applications only. System applications,
+including Android overlays, are managed through **More > Add system apps**.
+Classification uses Android's package-manager list even when the WebUI host
+cannot provide an application's label or metadata. Hiding system applications
+from the main list does not remove their saved routing selections.
+
 The Settings page keeps the selected language, theme mode, accent, and visual
-effects in the WebUI's local storage. Monet and the accent selection are
-independent. When Monet is enabled, **Default** uses the system's dynamic
-colors; selecting a fixed accent uses that color as the seed while Monet stays
-enabled. When Monet is disabled, the selected fixed accent is used, and
-**Default** falls back to the application's default blue. Bar blur, floating
+effects in the WebUI's local storage. When Monet is enabled, **Default** reads
+the current Android user's resolved dynamic primary colors from system resources,
+including wallpaper overlays, for both light and dark mode. Colors refresh on
+opening the WebUI, returning to the foreground, and system theme changes.
+Android 14 and newer use named primary roles; Android 12-13 use the equivalent
+accent palette tones. A fixed accent supplies a custom seed instead.
+The selected palette style and color standard generate the full MIUIX palette
+using Material Color Utilities and MIUIX's role mapping, including neutral
+unchecked controls and themed surfaces. Rainbow and FruitSalad use SPEC_2021,
+as SPEC_2025 does not define those styles. If system colors cannot be read,
+the current session retains its last resolved colors, or uses the static MIUIX
+palette when none are available. No wallpaper data or new persistent cache is created.
+Turning Monet off restores the static MIUIX light/dark palette while remembering
+the selected accent for the next time Monet is enabled. Bar blur, floating
 navigation, and liquid glass are optional and remain disabled until selected;
 liquid glass uses the floating navigation layout automatically.
+The bottom navigation stays anchored above the host's bottom safe area while
+pages switch and restore their own scroll positions. Interface scaling changes
+the bar's size without scaling the host's safe-area spacing. Top and side
+safe areas also retain their physical size at every interface scale. Scroll
+clearance follows the actual navigation height and bottom offset, so the last
+item can be scrolled fully above the bar.
+
+Native status and navigation bar icons are controlled by the WebUI host.
+The WebUI enables edge-to-edge layout and extends its surface behind the system
+bars when the host and content use matching light/dark modes. When the modes
+differ, only the system safe areas use the host surface from
+`/internal/colors.css` to preserve icon contrast. Hosts without this endpoint
+use the WebView's system color preference for this fallback. System bars remain
+visible; this does not change the host or Android theme settings.
 
 The Home page reads each identity item independently. The Keybox card parses
 the installed XML and checks the private key against its leaf certificate
@@ -259,6 +288,10 @@ then does it atomically replace the canonical lowercase
 `/data/misc/keystore/omk/keybox.xml`. A read, size, UTF-8, validation, or write
 failure leaves the active keybox unchanged. The keybox watcher loads a
 successful replacement automatically, so a restart is normally unnecessary.
+RSA-only, EC-only, and combined keyboxes are supported. When only one algorithm
+is present, its key signs attestation leaves for both RSA and EC subject keys.
+RSA private keys accept unencrypted PKCS#1 or PKCS#8 PEM encoding and normalize
+to PKCS#1 for identity hashing and XML export.
 The reload preserves ordinary application signing keys, including passkey
 credentials. Only dedicated `ATTEST_KEY` entries tied to the previous keybox
 are retired.

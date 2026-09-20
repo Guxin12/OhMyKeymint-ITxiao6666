@@ -16,6 +16,7 @@
     "vue-tsc": "^3.3.11"
   },
   "dependencies": {
+    "@material/material-color-utilities": "0.4.0",
     "kernelsu-alt": "^3.1.2",
     "miuix-vue": "0.1.1",
     "motion-v": "^2.4.2",

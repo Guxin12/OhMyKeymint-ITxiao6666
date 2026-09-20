@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">ปลอมแปลงลายนิ้วมือ PIF</string>
     <string name="menu_language">ภาษา</string>
     <string name="menu_more_options">ตัวเลือกเพิ่มเติม</string>
-    <string name="menu_select_all">เลือกทั้งหมด</string>
+    <string name="menu_select_all">เลือกแอปที่แนะนำ</string>
+    <string name="menu_select_recommended_desc">เลือกแอปผู้ใช้และบริการ Google โดยข้ามเครื่องมือ Root, Shizuku และ Xposed ที่ตรวจพบ คงรายการที่เลือกไว้เดิม</string>
     <string name="menu_deselect_all">ล้างการเลือกทั้งหมด</string>
     <string name="menu_refresh">รีเฟรช</string>
     <string name="prompt_saved_target">บันทึกการตั้งค่าแล้ว</string>

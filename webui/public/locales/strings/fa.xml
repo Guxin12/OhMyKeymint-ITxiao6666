@@ -16,7 +16,8 @@
     <string name="menu_spoof_pif_fingerprint">جعل اثر انگشت PIF</string>
     <string name="menu_language">زبان</string>
     <string name="menu_more_options">گزینه‌های بیشتر</string>
-    <string name="menu_select_all">انتخاب همه</string>
+    <string name="menu_select_all">انتخاب برنامه‌های پیشنهادی</string>
+    <string name="menu_select_recommended_desc">برنامه‌های کاربر و خدمات Google؛ ابزارهای شناخته‌شده Root، Shizuku و Xposed انتخاب نمی‌شوند. انتخاب‌های فعلی حفظ می‌شوند.</string>
     <string name="menu_deselect_all">لغو انتخاب همه</string>
     <string name="menu_refresh">تازه‌سازی</string>
     <string name="prompt_saved_target">پیکربندی ذخیره شد</string>
