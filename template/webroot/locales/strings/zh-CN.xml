@@ -174,4 +174,12 @@
     <string name="settings_floating_bottom_bar_desc">将导航栏显示为悬浮面板</string>
     <string name="settings_liquid_glass">液态玻璃</string>
     <string name="settings_liquid_glass_desc">为界面增加半透明玻璃层次</string>
+    <string name="tools_soter_beta">修复腾讯Soter Server (Beta)</string>
+    <string name="tools_soter_beta_desc">腾讯 SoterServer 的实验性兼容功能，需要 Zygisk Next。</string>
+    <string name="soter_beta_warning">仅限 Beta 模拟：返回固定公钥与全零签名，并非真实 TEE 认证，也不能修复支付或加密签名。仅作用于腾讯 SoterServer，不影响 KeyMint。</string>
+    <string name="soter_beta_enabled">启用功能</string>
+    <string name="soter_beta_enabled_desc">默认关闭。点击应用后才会保存更改。</string>
+    <string name="soter_beta_reboot">请自行安装并启用 Zygisk Next。开启或关闭后均需重启设备；兼容效果尚未验证。</string>
+    <string name="soter_beta_saved">Soter Beta 设置已保存，请重启设备以应用；兼容效果尚未验证。</string>
+    <string name="soter_beta_preview">仅为界面预览，此处无法保存设备设置。</string>
 </resources>

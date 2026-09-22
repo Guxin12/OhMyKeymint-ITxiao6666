@@ -69,6 +69,9 @@ export interface AdbDisablerState {
   usb_debug: boolean
   oem_unlock: boolean
 }
+export interface SoterBetaState {
+  enabled: boolean
+}
 export type PlayIntegrityStatus = 'not_checked'
 export type KeyboxRevocationStatus =
   | 'not_checked'
@@ -342,6 +345,26 @@ export class Cli {
       throw new Error('OMK returned invalid ADB Disabler state')
     }
     return parsed as unknown as AdbDisablerState
+  }
+
+  async getSoterBeta(): Promise<SoterBetaState> {
+    const { keymint } = await this.#getHelperPaths()
+    const output = await this.#run(keymint, ['--webui-get-soter-beta'], 256)
+    const parsed = parseCanonicalJson(output, 'Soter Beta state')
+    if (!isRecord(parsed)
+        || !hasOnlyKeys(parsed, ['enabled'])
+        || typeof parsed.enabled !== 'boolean') {
+      throw new Error('OMK returned invalid Soter Beta state')
+    }
+    return { enabled: parsed.enabled }
+  }
+
+  async setSoterBeta(enabled: boolean): Promise<void> {
+    const { keymint } = await this.#getHelperPaths()
+    const output = await this.#run(keymint, ['--webui-set-soter-beta', enabled ? '1' : '0'], 256)
+    if (output !== 'soter_beta_saved') {
+      throw new Error('OMK returned an unexpected Soter Beta result')
+    }
   }
 
   async syncSecurityPatch(date: string): Promise<string> {

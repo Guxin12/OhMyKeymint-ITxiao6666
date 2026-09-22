@@ -24,6 +24,7 @@ import { isDev } from '../utils/dev'
 import HomeView, { type KeyboxStatus, type ModuleStatus, type TeeStatus } from './HomeView.vue'
 import PifFingerprintDialog from './PifFingerprintDialog.vue'
 import SettingsView from './SettingsView.vue'
+import SoterDialog from './SoterDialog.vue'
 import TargetsView from './TargetsView.vue'
 import ToolsView, { type ToolEvent } from './ToolsView.vue'
 import FileBrowserSheet from './FileBrowserSheet.vue'
@@ -59,12 +60,15 @@ const adbEnabled = ref(true)
 const adbDevOptions = ref(true)
 const adbUsbDebug = ref(true)
 const adbOemUnlock = ref(true)
+const soterOpen = ref(false)
 const pifOpen = ref(false)
 const keyboxOpen = ref(false)
 const selectedKeybox = ref<{ name: string, contents: Uint8Array } | null>(null)
 const keyboxBusy = ref(false)
 const targetsView = ref<InstanceType<typeof TargetsView> | null>(null)
+const settingsView = ref<InstanceType<typeof SettingsView> | null>(null)
 const pifDialog = ref<InstanceType<typeof PifFingerprintDialog> | null>(null)
+const soterDialog = ref<InstanceType<typeof SoterDialog> | null>(null)
 
 const pageIds = ['home', 'tools', 'settings'] as const
 const navItems = computed(() => [
@@ -253,12 +257,28 @@ function onTargetsOverlayOpen(): void {
   history.push(key, () => { targetsView.value?.dismissOverlay() })
 }
 
+function onSettingsOverlayOpen(): void {
+  const key = 'settings-overlay'
+  if (overlayHistory.has(key)) return
+  overlayHistory.add(key)
+  history.push(key, () => {
+    overlayHistory.delete(key)
+    settingsView.value?.dismissOverlay()
+  })
+}
+
+function onSettingsOverlayClose(): void {
+  const key = 'settings-overlay'
+  if (overlayHistory.delete(key)) history.consume(key)
+}
+
 function onTargetsOverlayClose(): void {
   const key = 'targets-overlay'
   if (overlayHistory.delete(key)) history.consume(key)
 }
 
 function handleEscape(): void {
+  if (soterOpen.value && soterDialog.value?.busy) return
   if (targetsOpen.value && targetsView.value?.dismissOverlay()) return
   if (history.size > 0) history.back()
 }
@@ -434,6 +454,7 @@ function onTool(event: ToolEvent): void {
     case 'syncSecurityPatch': void syncPatch(false); break
     case 'restoreSecurityPatch': void syncPatch(true); break
     case 'openAdbDisabler': void openAdbDisabler(); break
+    case 'openSoterBeta': soterOpen.value = true; break
     case 'spoofPif': pifOpen.value = true; break
   }
 }
@@ -567,6 +588,23 @@ watch(adbOpen, open => {
     history.push('adb-disabler', () => { if (!adbBusy.value) adbOpen.value = false })
   } else if (!open && overlayHistory.delete('adb-disabler')) history.consume('adb-disabler')
 })
+function trackSoterOverlay(): void {
+  const key = 'soter-beta'
+  if (!soterOpen.value || overlayHistory.has(key)) return
+  overlayHistory.add(key)
+  history.push(key, () => {
+    overlayHistory.delete(key)
+    if (soterDialog.value?.requestClose() === false) {
+      // Re-arm after the current popstate handler finishes so a busy dialog
+      // does not lose its back entry or close the page beneath it.
+      void nextTick(trackSoterOverlay)
+    }
+  })
+}
+watch(soterOpen, open => {
+  if (open) trackSoterOverlay()
+  else if (overlayHistory.delete('soter-beta')) history.consume('soter-beta')
+})
 watch(keyboxOpen, open => {
   if (open && !overlayHistory.has('keybox')) {
     overlayHistory.add('keybox')
@@ -604,11 +642,17 @@ watch(keyboxOpen, open => {
           @sync-security-patch="onTool('syncSecurityPatch')"
           @restore-security-patch="onTool('restoreSecurityPatch')"
           @open-adb-disabler="onTool('openAdbDisabler')"
+          @open-soter-beta="onTool('openSoterBeta')"
           @spoof-pif="onTool('spoofPif')"
         />
       </Transition>
       <Transition name="page-switch">
-        <SettingsView v-show="pageIndex === 2" />
+        <SettingsView
+          v-show="pageIndex === 2"
+          ref="settingsView"
+          @overlay-open="onSettingsOverlayOpen"
+          @overlay-close="onSettingsOverlayClose"
+        />
       </Transition>
     </main>
 
@@ -716,6 +760,7 @@ watch(keyboxOpen, open => {
       @notify="notify"
       @changed="refreshIdentity(true); refreshActivity()"
     />
+    <SoterDialog ref="soterDialog" v-model="soterOpen" :cli="cli" @notify="notify" />
     <MiuixSnackbarHost />
   </div>
 </template>

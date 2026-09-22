@@ -63,7 +63,8 @@ change does not require a keymint restart.
 
 The module includes a WebUI for selecting packages in `scoop`, installing a
 local keybox, managing the Android security patch level, applying a Pixel
-PIF fingerprint through OMK's own Zygisk payload, and configuring ADB Disabler.
+PIF fingerprint through OMK's own Zygisk payload, configuring ADB Disabler,
+and independently enabling Tencent Soter compatibility (Beta).
 ADB Disabler controls developer options, USB debugging, and OEM unlock and
 reapplies the selected settings at boot. Open it from the Oh My Keymint module page in
 KernelSU. With Magisk, open an installed KSUWebUIStandalone or WebUI X host and
@@ -76,7 +77,10 @@ cannot provide an application's label or metadata. Hiding system applications
 from the main list does not remove their saved routing selections.
 
 The Settings page keeps the selected language, theme mode, accent, and visual
-effects in the WebUI's local storage. When Monet is enabled, **Default** reads
+effects in the WebUI's local storage. Language selection opens a height-limited
+MIUIX bottom sheet with single-choice rows, including the system-language option.
+The list scrolls inside the sheet; dismissing it or navigating back leaves the
+current selection unchanged. When Monet is enabled, **Default** reads
 the current Android user's resolved dynamic primary colors from system resources,
 including wallpaper overlays, for both light and dark mode. Colors refresh on
 opening the WebUI, returning to the foreground, and system theme changes.
@@ -263,6 +267,32 @@ ADB Disabler stores four strict `0/1` values in
 applies only the selected sub-options and the service script replays them on
 each boot. Disabling the master switch stops future replay; it intentionally
 does not restore properties that were already changed in the current boot.
+
+**Tencent Soter compatibility (Beta)** is an optional simulation based on
+D-soter. Its switch is disabled by default and is independent of PIF, `scoop`,
+and all KeyMint routing and key storage. Applying the switch atomically stores
+one strict `0` or `1` byte in
+`/data/misc/keystore/omk/data/soter_beta.conf`. Opening or cancelling the dialog
+does not write this file. The native commands are `--webui-get-soter-beta` and
+`--webui-set-soter-beta 0|1`; both run as short-lived root helpers without
+starting the daemon. Read failures are reported to the WebUI, and the payload
+does not enable the experiment when configuration cannot be validated.
+
+The user must install and enable Zygisk Next separately and reboot after
+enabling or disabling this option. The module does not restart Soter itself.
+The existing Zygisk entry point selects only the exact
+`com.tencent.soter.soterserver` process with its matching Android app data
+directory. The separate Rust handler redirects supported synchronous
+`com.tencent.soter.soterserver.ISoterService` requests to a local Binder stub;
+unrecognized transactions are left unchanged. Other processes, including
+Google Play and KeyMint, do not install this handler.
+
+Replies contain a fixed public-key placeholder, zero-filled signatures, and
+simulated success values. They are not authentic TEE keys, cryptographically
+valid signatures, payment repairs, or Play Integrity verdicts. Saving a switch
+confirms only that the preference was saved, not that device compatibility was
+verified. The feature is experimental; no supported-OS-wide validation is
+implied. Disabling and rebooting restores the unmodified Soter process path.
 
 All other WebUI assets are bundled and no network request is made for normal
 local operations. None of the WebUI network paths requires a device-provided

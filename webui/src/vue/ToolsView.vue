@@ -16,6 +16,7 @@ export type ToolEvent =
   | 'syncSecurityPatch'
   | 'restoreSecurityPatch'
   | 'openAdbDisabler'
+  | 'openSoterBeta'
   | 'spoofPif'
 
 type BusyPatch = 'sync' | 'restore' | null
@@ -31,6 +32,7 @@ const emit = defineEmits<{
   syncSecurityPatch: []
   restoreSecurityPatch: []
   openAdbDisabler: []
+  openSoterBeta: []
   spoofPif: []
 }>()
 
@@ -41,6 +43,7 @@ function runTool(event: ToolEvent): void {
     case 'syncSecurityPatch': emit('syncSecurityPatch'); break
     case 'restoreSecurityPatch': emit('restoreSecurityPatch'); break
     case 'openAdbDisabler': emit('openAdbDisabler'); break
+    case 'openSoterBeta': emit('openSoterBeta'); break
     case 'spoofPif': emit('spoofPif'); break
   }
 }
@@ -74,6 +77,12 @@ const groups = [
         icon: Lock,
         title: tr('tools_adb_disabler', 'ADB Disabler'),
         summary: tr('tools_adb_disabler_desc', 'Disable developer options, USB debugging and OEM unlock at boot.'),
+      },
+      {
+        event: 'openSoterBeta' as const,
+        icon: Tune,
+        title: tr('tools_soter_beta', 'Tencent Soter compatibility (Beta)'),
+        summary: tr('tools_soter_beta_desc', 'Experimental compatibility for Tencent SoterServer. Requires Zygisk Next.'),
       },
     ],
   },

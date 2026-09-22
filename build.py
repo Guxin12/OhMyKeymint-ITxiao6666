@@ -67,6 +67,7 @@ MODULE_TEXT_FILES = (
     "README.md",
     "THIRD_PARTY_LICENSES/Tricky-Addon-Update-Target-List.txt",
     "THIRD_PARTY_LICENSES/zygisk-api-0BSD.txt",
+    "THIRD_PARTY_LICENSES/D-soter.txt",
     "customize.sh",
     "daemon",
     "daemon-injector",
@@ -268,6 +269,10 @@ def copy_project_documents(stage_dir: Path) -> None:
             REPO_ROOT / "third_party" / "zygisk-api" / "LICENSE",
             stage_dir / "THIRD_PARTY_LICENSES" / "zygisk-api-0BSD.txt",
         ),
+        (
+            REPO_ROOT / "pif-spoof" / "D-soter.NOTICE",
+            stage_dir / "THIRD_PARTY_LICENSES" / "D-soter.txt",
+        ),
     )
     for source, destination in documents:
         if not source.is_file():
@@ -411,7 +416,7 @@ def create_zip_package(
     zip_path = TARGET_ROOT / zip_name
     print(f"Creating zip package: {zip_path}")
 
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
         for root, _, files in os.walk(stage_dir):
             for file_name in files:
                 file_path = Path(root) / file_name

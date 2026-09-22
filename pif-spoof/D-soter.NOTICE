@@ -1,0 +1,13 @@
+D-soter compatibility experiment
+
+Source: https://github.com/ajfkdk/D-soter
+Revision: 6148e02ea5977cb95b5a162a405fc915e39c01db
+Referenced source: module/jni/dsoter.cpp
+License: Apache License, Version 2.0
+
+Oh My Keymint adapts the public reply contract and public-key placeholder in
+an independent Rust implementation. It does not bundle upstream C++ code or
+prebuilt binaries. The experiment uses simulated responses and cannot provide
+real TEE keys, valid cryptographic signatures, or payment authentication.
+
+The Apache License 2.0 is included in AOSP.Apache-license-2.0.txt.

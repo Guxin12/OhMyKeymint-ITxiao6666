@@ -174,4 +174,12 @@
     <string name="settings_floating_bottom_bar_desc">Show navigation as a floating panel</string>
     <string name="settings_liquid_glass">Liquid glass</string>
     <string name="settings_liquid_glass_desc">Add translucent glass depth to surfaces</string>
+    <string name="tools_soter_beta">Tencent Soter compatibility (Beta)</string>
+    <string name="tools_soter_beta_desc">Experimental compatibility for Tencent SoterServer. Requires Zygisk Next.</string>
+    <string name="soter_beta_warning">Beta simulation only: returns a fixed public key and zero-filled signatures. This is not real TEE attestation and does not repair payments or cryptographic signatures. Applies only to Tencent SoterServer, not KeyMint.</string>
+    <string name="soter_beta_enabled">Enable Soter compatibility</string>
+    <string name="soter_beta_enabled_desc">Disabled by default. Changes are saved only after you tap Apply.</string>
+    <string name="soter_beta_reboot">Install and enable Zygisk Next separately. Restart the device after enabling or disabling. Compatibility is not verified.</string>
+    <string name="soter_beta_saved">Soter Beta preference saved. Restart the device to apply. Compatibility is not verified.</string>
+    <string name="soter_beta_preview">Preview only. Device settings cannot be saved here.</string>
 </resources>

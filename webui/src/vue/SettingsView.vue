@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   MiuixArrowPreference,
   MiuixCard,
+  MiuixBottomSheet,
   MiuixDivider,
   MiuixDropdownPreference,
   MiuixIcon,
+  MiuixIconButton,
+  MiuixRadioButtonPreference,
   MiuixSlider,
   MiuixSmallTitle,
   MiuixSpinnerPreference,
@@ -13,7 +16,7 @@ import {
   MiuixTopAppBar,
   type MiuixDropdownItem,
 } from 'miuix-vue'
-import { Background, Layers, Sidebar, Theme, Translate, Tune } from 'miuix-vue/icons'
+import { Background, Close, Layers, Sidebar, Theme, Translate, Tune } from 'miuix-vue/icons'
 import {
   ACCENT_COLORS,
   ACCENT_SEEDS,
@@ -83,6 +86,9 @@ const accentItems = computed<MiuixDropdownItem[]>(() => ACCENT_CHOICES.map(choic
 })))
 const paletteStyleItems = computed<string[]>(() => PALETTE_STYLES.map(style => style))
 const colorSpecItems = computed<string[]>(() => COLOR_SPECS.map(spec => spec))
+const selectedLanguageLabel = computed(() =>
+  languageItems.value[languageIndex.value] ?? translate('settings_language_auto', 'Follow system language'),
+)
 
 const modeIndex = ref(Math.max(0, APPEARANCE_MODES.indexOf(appearance.mode)))
 const languageIndex = ref(Math.max(0, languageCodes.indexOf(i18n.preference)))
@@ -92,6 +98,18 @@ const colorSpecIndex = ref(Math.max(0, COLOR_SPECS.indexOf(appearance.colorSpec)
 const options = ref<Record<AppearanceOption, boolean>>(readOptions())
 const interfaceScale = ref(appearance.interfaceScale)
 const showScaleSlider = ref(false)
+const languageSheetOpen = ref(false)
+const emit = defineEmits<{
+  'overlay-open': []
+  'overlay-close': []
+}>()
+
+watch(languageSheetOpen, open => {
+  if (open) emit('overlay-open')
+  else emit('overlay-close')
+})
+
+defineExpose({ dismissOverlay: () => { languageSheetOpen.value = false } })
 
 function readOptions(): Record<AppearanceOption, boolean> {
   return {
@@ -123,6 +141,7 @@ function selectLanguage(index: number): void {
   if (language === undefined) return
   languageIndex.value = index
   if (language !== i18n.preference) i18n.setLanguage(language)
+  else languageSheetOpen.value = false
 }
 
 function selectAccent(index: number): void {
@@ -176,12 +195,14 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
         <MiuixCard class="settings-card settings-card--single" press-feedback="none">
           <div class="settings-dropdown">
             <span class="settings-preference-icon" aria-hidden="true"><MiuixIcon :icon="Translate" :size="22" /></span>
-            <MiuixDropdownPreference
-              :model-value="languageIndex"
+            <MiuixArrowPreference
               :title="translate('settings_language', 'Language')"
-              :items="languageItems"
-              @update:model-value="selectLanguage"
-            />
+              @click="languageSheetOpen = true"
+            >
+              <template #end>
+                <span class="settings-dropdown__value">{{ selectedLanguageLabel }}</span>
+              </template>
+            </MiuixArrowPreference>
           </div>
         </MiuixCard>
       </section>
@@ -348,6 +369,32 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
         </MiuixCard>
       </section>
     </div>
+
+    <MiuixBottomSheet
+      v-model="languageSheetOpen"
+      :title="translate('settings_language', 'Language')"
+    >
+      <template #start-action>
+        <MiuixIconButton
+          :aria-label="translate('functional_button_cancel', 'Cancel')"
+          @click="languageSheetOpen = false"
+        >
+          <MiuixIcon :icon="Close" :size="22" />
+        </MiuixIconButton>
+      </template>
+      <div class="language-sheet">
+        <MiuixCard class="language-sheet__list" press-feedback="none">
+          <MiuixRadioButtonPreference
+            v-for="(item, index) in languageItems"
+            :key="languageCodes[index]"
+            :model-value="languageIndex === index"
+            :title="item"
+            location="end"
+            @select="selectLanguage(index)"
+          />
+        </MiuixCard>
+      </div>
+    </MiuixBottomSheet>
   </section>
 </template>
 
@@ -422,6 +469,37 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
 .settings-dropdown :deep(.m-dropdown-preference__value) {
   overflow-wrap: anywhere;
   text-align: end;
+}
+
+.settings-dropdown__value {
+  max-width: min(42vw, 250px);
+  overflow: hidden;
+  color: var(--m-color-on-surface-variant-summary);
+  font-size: 14px;
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.language-sheet {
+  max-height: min(62vh, 560px);
+  max-height: min(62dvh, 560px);
+  overflow: auto;
+  overscroll-behavior-y: contain;
+  padding-bottom: 12px;
+  scrollbar-width: none;
+}
+
+.language-sheet::-webkit-scrollbar { display: none; }
+.language-sheet__list { width: 100%; }
+.language-sheet__list :deep(.m-basic-component) {
+  min-height: 56px;
+  padding: 12px 16px;
+}
+.language-sheet__list :deep(.m-basic-component__center > .m-text--headline1) {
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .settings-divider {

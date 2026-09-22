@@ -169,4 +169,12 @@
     <string name="settings_floating_bottom_bar_desc">Показывать навигацию как плавающую панель</string>
     <string name="settings_liquid_glass">Жидкое стекло</string>
     <string name="settings_liquid_glass_desc">Добавить полупрозрачный стеклянный эффект поверхностям</string>
+    <string name="tools_soter_beta">Совместимость с Tencent Soter (Бета)</string>
+    <string name="tools_soter_beta_desc">Экспериментальная совместимость с Tencent SoterServer. Требуется Zygisk Next.</string>
+    <string name="soter_beta_warning">Только бета-симуляция: возвращает фиксированный открытый ключ и подписи, заполненные нулями. Это не настоящая аттестация TEE и не исправление платежей или криптографических подписей. Применяется только к Tencent SoterServer, а не к KeyMint.</string>
+    <string name="soter_beta_enabled">Включить совместимость с Soter</string>
+    <string name="soter_beta_enabled_desc">По умолчанию выключено. Изменения сохраняются только после нажатия «Применить».</string>
+    <string name="soter_beta_reboot">Установите и включите Zygisk Next отдельно. После включения или выключения перезагрузите устройство. Совместимость не проверена.</string>
+    <string name="soter_beta_saved">Настройка Soter Бета сохранена. Перезагрузите устройство для применения. Совместимость не проверена.</string>
+    <string name="soter_beta_preview">Только предпросмотр. Здесь нельзя сохранить настройки устройства.</string>
 </resources>

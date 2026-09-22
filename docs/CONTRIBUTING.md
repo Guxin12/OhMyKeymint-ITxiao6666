@@ -119,6 +119,12 @@ python build.py --debug
 
 Release packages use the identity order `OhMyKeymint-<version>-<commit count>-<short commit hash>-release.zip` for the default arm64 build; the packaged `module.prop` shows the same identity in parentheses. A `-dirty` suffix is included when the source worktree has uncommitted changes.
 
+Module archives use standard ZIP Deflate at compression level 9 and retain
+per-file SHA-256 verification. Native release binaries keep speed-oriented
+optimization, LTO and symbol stripping. The log4rs dependency enables only
+console and pattern encoding; OMK's shared rotating-file logger handles file
+output without log4rs configuration-file parsers or built-in rolling appenders.
+
 Rust changes must pass:
 
 ```sh

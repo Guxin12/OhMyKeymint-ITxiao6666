@@ -169,4 +169,12 @@
     <string name="settings_floating_bottom_bar_desc">Tampilkan navigasi sebagai panel mengambang</string>
     <string name="settings_liquid_glass">Kaca cair</string>
     <string name="settings_liquid_glass_desc">Tambahkan kedalaman kaca transparan pada permukaan</string>
+    <string name="tools_soter_beta">Kompatibilitas Tencent Soter (Beta)</string>
+    <string name="tools_soter_beta_desc">Kompatibilitas eksperimental untuk Tencent SoterServer. Memerlukan Zygisk Next.</string>
+    <string name="soter_beta_warning">Hanya simulasi Beta: mengembalikan kunci publik tetap dan tanda tangan berisi nol. Ini bukan atestasi TEE asli dan tidak memperbaiki pembayaran atau tanda tangan kriptografis. Hanya berlaku untuk Tencent SoterServer, bukan KeyMint.</string>
+    <string name="soter_beta_enabled">Aktifkan kompatibilitas Soter</string>
+    <string name="soter_beta_enabled_desc">Dinonaktifkan secara default. Perubahan hanya disimpan setelah mengetuk Terapkan.</string>
+    <string name="soter_beta_reboot">Pasang dan aktifkan Zygisk Next secara terpisah. Mulai ulang perangkat setelah mengaktifkan atau menonaktifkan. Kompatibilitas belum diverifikasi.</string>
+    <string name="soter_beta_saved">Pengaturan Soter Beta disimpan. Mulai ulang perangkat untuk menerapkan. Kompatibilitas belum diverifikasi.</string>
+    <string name="soter_beta_preview">Hanya pratinjau. Pengaturan perangkat tidak dapat disimpan di sini.</string>
 </resources>

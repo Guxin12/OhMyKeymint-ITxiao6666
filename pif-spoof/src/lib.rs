@@ -26,7 +26,10 @@ use zygisk_api::{
 
 use libc::{c_char, c_void};
 
+mod soter;
+
 const PROFILE_PATH: &str = "/data/misc/keystore/omk/data/pif_fingerprint.json";
+const SOTER_PROCESS: &str = soter::PACKAGE;
 const GMS_PROCESS: &str = "com.google.android.gms.unstable";
 const GMS_PACKAGE: &str = "com.google.android.gms";
 const VENDING_PROCESS: &str = "com.android.vending";
@@ -94,6 +97,25 @@ impl ZygiskModule for PifSpoofModule {
     ) {
         let process = read_java_string(&mut env, args.nice_name);
         let data_dir = read_java_string(&mut env, args.app_data_dir);
+        if is_soter_target(process.as_deref(), data_dir.as_deref()) {
+            match api.with_companion(read_soter_from_companion) {
+                Ok(Ok(true)) => {
+                    // Native Binder callbacks may outlive a partially installed
+                    // hook. Keep the payload mapped once installation is attempted.
+                    match soter::install(&mut api) {
+                        Ok(()) => log_android("Soter Beta hook installed; responses are simulated"),
+                        Err(error) => log_android(&format!("Soter Beta hook unavailable: {error}")),
+                    }
+                }
+                result => {
+                    if !matches!(result, Ok(Ok(false))) {
+                        log_android(&format!("Soter Beta companion unavailable: {result:?}"));
+                    }
+                    api.set_option(ZygiskOption::DlCloseModuleLibrary);
+                }
+            }
+            return;
+        }
         if !is_target_process(process.as_deref(), data_dir.as_deref()) {
             api.set_option(ZygiskOption::DlCloseModuleLibrary);
             return;
@@ -1303,6 +1325,11 @@ unsafe extern "C" fn property_value_callback(
     unsafe { (context.callback)(context.cookie, name, value, serial) };
 }
 
+fn is_soter_target(process: Option<&str>, data_dir: Option<&str>) -> bool {
+    process == Some(SOTER_PROCESS)
+        && data_dir.is_some_and(|path| is_package_data_dir(path, SOTER_PROCESS))
+}
+
 fn is_target_process(process: Option<&str>, data_dir: Option<&str>) -> bool {
     match (process, data_dir) {
         // A few Zygisk loaders expose the process name before the app data
@@ -1373,15 +1400,55 @@ fn read_profile_from_companion(
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+fn read_soter_from_companion(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<bool> {
+    stream.set_read_timeout(Some(IPC_TIMEOUT))?;
+    read_soter_frame(stream)
+}
+
+fn read_soter_frame(stream: &mut impl Read) -> std::io::Result<bool> {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_PROFILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "companion profile exceeds the 4 KiB limit",
+        ));
+    }
+    // The existing PIF frame stays byte-for-byte compatible. Soter ignores
+    // its contents and reads only the appended independent setting.
+    let mut contents = [0u8; MAX_PROFILE_BYTES];
+    stream.read_exact(&mut contents[..length])?;
+    let mut enabled = [0u8; 1];
+    match stream.read_exact(&mut enabled) {
+        Ok(()) if enabled[0] <= 1 => Ok(enabled[0] == 1),
+        Ok(()) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid Soter Beta companion flag",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn companion(stream: &mut std::os::unix::net::UnixStream) {
     let payload = load_profile_for_companion().unwrap_or_else(|error| {
         log_android(&format!("PIF companion rejected profile: {error}"));
         Vec::new()
     });
+    let soter_enabled = pif_common::soter::read().unwrap_or_else(|error| {
+        log_android(&format!(
+            "Soter Beta companion rejected configuration: {error}"
+        ));
+        false
+    });
+    let mut frame = Vec::with_capacity(4 + payload.len() + 1);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    frame.push(u8::from(soter_enabled));
     if let Err(error) = stream
         .set_write_timeout(Some(IPC_TIMEOUT))
-        .and_then(|()| stream.write_all(&(payload.len() as u32).to_be_bytes()))
-        .and_then(|()| stream.write_all(&payload))
+        .and_then(|()| stream.write_all(&frame))
     {
         log_android(&format!("PIF companion write failed: {error}"));
     }
@@ -1461,6 +1528,53 @@ zygisk_api::register_companion!(companion);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soter_requires_exact_process_and_own_data_directory() {
+        for path in [
+            "/data/user/0/com.tencent.soter.soterserver",
+            "/data/user_de/10/com.tencent.soter.soterserver",
+            "/data/data/com.tencent.soter.soterserver",
+        ] {
+            assert!(is_soter_target(Some(SOTER_PROCESS), Some(path)));
+        }
+        for process in [
+            "com.tencent.soter.soterserver:remote",
+            GMS_PROCESS,
+            VENDING_PROCESS,
+        ] {
+            assert!(!is_soter_target(
+                Some(process),
+                Some("/data/data/com.tencent.soter.soterserver")
+            ));
+        }
+        for path in [
+            None,
+            Some(""),
+            Some("/data/local/tmp/com.tencent.soter.soterserver"),
+            Some("/data/data/other.package"),
+        ] {
+            assert!(!is_soter_target(Some(SOTER_PROCESS), path));
+        }
+    }
+
+    #[test]
+    fn soter_companion_frame_is_independent_and_bounded() {
+        for payload in [b"".as_slice(), b"not a PIF profile".as_slice()] {
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(payload);
+            assert!(!read_soter_frame(&mut frame.as_slice()).unwrap());
+            frame.push(1);
+            assert!(read_soter_frame(&mut frame.as_slice()).unwrap());
+            *frame.last_mut().unwrap() = 0;
+            assert!(!read_soter_frame(&mut frame.as_slice()).unwrap());
+            *frame.last_mut().unwrap() = 2;
+            assert!(read_soter_frame(&mut frame.as_slice()).is_err());
+        }
+        let oversized = (MAX_PROFILE_BYTES as u32 + 1).to_be_bytes();
+        assert!(read_soter_frame(&mut oversized.as_slice()).is_err());
+        assert!(read_soter_frame(&mut [0, 0, 0, 2, 0].as_slice()).is_err());
+    }
 
     fn test_profile() -> PifProfile {
         PifProfile {
