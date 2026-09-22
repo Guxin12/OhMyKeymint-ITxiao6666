@@ -281,11 +281,36 @@ does not enable the experiment when configuration cannot be validated.
 The user must install and enable Zygisk Next separately and reboot after
 enabling or disabling this option. The module does not restart Soter itself.
 The existing Zygisk entry point selects only the exact
-`com.tencent.soter.soterserver` process with its matching Android app data
-directory. The separate Rust handler redirects supported synchronous
-`com.tencent.soter.soterserver.ISoterService` requests to a local Binder stub;
-unrecognized transactions are left unchanged. Other processes, including
-Google Play and KeyMint, do not install this handler.
+`com.tencent.soter.soterserver` process. A supplied nonempty app data directory
+must belong to that package; loaders which omit it are supported. The separate
+Rust handler intercepts both Binder transaction and security-context transaction
+commands. It matches codes 1 through 13 and the UTF-16
+`com.tencent.soter.soterserver.ISoterService` descriptor, following D-soter.
+It does not interpret arguments or reject OEM trailing fields, transaction
+flags, or argument objects. Driver buffer and request sizes remain bounded to
+1 MiB. Matching requests go to a local Binder stub; unrecognized transactions
+remain unchanged. Other processes, including Google Play and KeyMint, do not
+install this handler.
+
+Zygisk registers the native hook before specialization. The local Binder stub
+is created and interception is activated after specialization, once Android
+has established the app's identity and file-descriptor state.
+
+Android 13 and newer use the NDK legacy-interface option to let the Rust
+handler match the descriptor independently of the Parcel header layout.
+Android 12/12L retain the platform's standard AIDL interface-header check;
+nonstandard headerless requests are not supported on those versions.
+All 13 upstream reply contracts are implemented: ASK and auth-key creation,
+export, existence and removal; signing sessions and signature results; device
+ID, version, and extra parameters.
+
+Diagnostics use the `OhMyKeymint-Soter` logcat tag. Loading, disabled state,
+companion failures and hook installation are logged separately. Each method
+logs its first intercepted request and first delivered simulated reply, or
+first reply failure, per process. Arguments, key data and challenges are not
+logged. To inspect an affected device after rebooting and invoking its Soter
+client, run `adb logcat -d -s OhMyKeymint-Soter:I`. An installation message alone
+does not establish that requests reached the handler.
 
 Replies contain a fixed public-key placeholder, zero-filled signatures, and
 simulated success values. They are not authentic TEE keys, cryptographically

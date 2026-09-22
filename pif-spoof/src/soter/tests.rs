@@ -76,19 +76,16 @@ fn transaction(code: u32, bytes: &[u8]) -> Transaction {
 }
 
 #[test]
-fn accepts_exact_supported_aidl_requests_and_rejects_every_truncation() {
+fn accepts_all_tencent_aidl_requests_and_oem_argument_extensions() {
     for code in 1..=13 {
         let bytes = request(code);
         assert!(wire::valid_request(code, &bytes), "code {code}");
-        for length in 0..bytes.len() {
-            assert!(
-                !wire::valid_request(code, &bytes[..length]),
-                "code {code} length {length}"
-            );
-        }
         let mut trailing = bytes;
-        trailing.extend_from_slice(&[0; 4]);
-        assert!(!wire::valid_request(code, &trailing));
+        trailing.extend_from_slice(&[0xff; 17]);
+        assert!(wire::valid_request(code, &trailing));
+        // Upstream replies never consume arguments, even when an OEM changes
+        // the signature or passes an empty/null name.
+        assert!(wire::valid_request(code, &request(12)));
     }
     for code in [0, 14, u32::MAX] {
         assert!(!wire::valid_request(code, &request(code)));
@@ -96,41 +93,40 @@ fn accepts_exact_supported_aidl_requests_and_rejects_every_truncation() {
 }
 
 #[test]
-fn rejects_token_substrings_header_variants_and_invalid_string_lengths() {
+fn matches_upstream_descriptor_scan_across_header_layouts() {
     let valid = request(12);
-    for index in [8, 12, 16, 17, 16 + DESCRIPTOR.to_bytes().len() * 2] {
-        let mut bytes = valid.clone();
-        bytes[index] ^= 1;
-        assert!(!wire::valid_request(12, &bytes), "byte {index}");
+    let descriptor = &valid[16..16 + DESCRIPTOR.to_bytes().len() * 2];
+    for prefix in [0, 1, 8, 12, 16, 31] {
+        let mut bytes = vec![0xff; prefix];
+        bytes.extend_from_slice(descriptor);
+        bytes.extend_from_slice(&[0xff; 19]);
+        for code in 1..=13 {
+            assert!(
+                wire::valid_request(code, &bytes),
+                "code {code} prefix {prefix}"
+            );
+        }
     }
-    let mut absent_header = valid[12..].to_vec();
-    assert!(!wire::valid_request(12, &absent_header));
-    absent_header.splice(0..0, [0; 32]);
-    assert!(!wire::valid_request(12, &absent_header));
-    for length in [-2, -1, i32::MAX] {
-        let mut bytes = valid.clone();
-        bytes[12..16].copy_from_slice(&length.to_le_bytes());
-        assert!(!wire::valid_request(12, &bytes));
-    }
-    let mut larger = valid.clone();
-    larger.resize(MAX_REQUEST_BYTES + 4, 0);
-    assert!(!wire::valid_request(12, &larger));
 }
 
 #[test]
-fn accepts_nullable_arguments_but_not_invalid_or_incomplete_strings() {
-    let prefix = request(12);
-    let mut null = prefix.clone();
-    null.extend_from_slice(&(-1i32).to_le_bytes());
-    assert!(wire::valid_request(13, &null));
-    for count in [-2, 0, 1, i32::MAX] {
-        let mut bytes = prefix.clone();
-        bytes.extend_from_slice(&count.to_le_bytes());
-        assert!(!wire::valid_request(13, &bytes));
+fn rejects_missing_corrupt_truncated_or_oversized_descriptors() {
+    let valid = request(12);
+    let descriptor = &valid[16..16 + DESCRIPTOR.to_bytes().len() * 2];
+    for length in 0..descriptor.len() {
+        assert!(!wire::valid_request(12, &descriptor[..length]));
     }
-    let mut unicode = Buffer(prefix);
-    unicode.string("\u{1f600}\u{4e2d}").unwrap();
-    assert!(wire::valid_request(13, &unicode.0));
+    for index in 0..descriptor.len() {
+        let mut bytes = valid.clone();
+        bytes[16 + index] ^= 1;
+        assert!(!wire::valid_request(12, &bytes));
+    }
+    assert!(!wire::valid_request(12, DESCRIPTOR.to_bytes()));
+    let mut larger = valid;
+    larger.resize(MAX_REQUEST_BYTES, 0);
+    assert!(wire::valid_request(12, &larger));
+    larger.push(0);
+    assert!(!wire::valid_request(12, &larger));
 }
 
 #[test]
@@ -143,7 +139,7 @@ fn preserves_all_transaction_fields_except_selected_target() {
         let bytes = request(code);
         let before = transaction(code, &bytes);
         let mut after = before;
-        retarget(&mut after, &bytes, destination);
+        assert!(retarget(&mut after, &bytes, destination));
         assert_eq!(
             after,
             Transaction {
@@ -156,24 +152,36 @@ fn preserves_all_transaction_fields_except_selected_target() {
 }
 
 #[test]
+fn preserves_oem_flags_and_argument_objects_when_redirecting() {
+    let bytes = request(3);
+    for flags in [0, 1, 8, 0x10, 0x30, 0x40, 0x100] {
+        let before = Transaction {
+            cookie: 0,
+            flags,
+            offsets_size: 8,
+            offsets: 0x12345678,
+            ..transaction(3, &bytes)
+        };
+        let mut after = before;
+        assert!(retarget(&mut after, &bytes, Target { ptr: 1, cookie: 2 }));
+        assert_eq!(
+            after,
+            Transaction {
+                target: 1,
+                cookie: 2,
+                ..before
+            }
+        );
+    }
+}
+
+#[test]
 fn leaves_unrelated_unsupported_or_malformed_transactions_unchanged() {
     let bytes = request(3);
     let base = transaction(3, &bytes);
     for before in [
         Transaction { target: 0, ..base },
-        Transaction { cookie: 0, ..base },
-        Transaction { flags: 1, ..base },
-        Transaction { flags: 8, ..base },
-        Transaction {
-            flags: 0x40,
-            ..base
-        },
         Transaction { code: 14, ..base },
-        Transaction { code: 10, ..base },
-        Transaction {
-            offsets_size: 8,
-            ..base
-        },
         Transaction {
             data_size: MAX_REQUEST_BYTES as u64 + 1,
             ..base
@@ -189,13 +197,17 @@ fn leaves_unrelated_unsupported_or_malformed_transactions_unchanged() {
         },
     ] {
         let mut after = before;
-        retarget(&mut after, &bytes, Target { ptr: 1, cookie: 2 });
+        assert!(!retarget(&mut after, &bytes, Target { ptr: 1, cookie: 2 }));
         assert_eq!(after, before);
     }
     let mut malformed = bytes.clone();
     malformed[16] ^= 1;
     let mut after = base;
-    retarget(&mut after, &malformed, Target { ptr: 1, cookie: 2 });
+    assert!(!retarget(
+        &mut after,
+        &malformed,
+        Target { ptr: 1, cookie: 2 }
+    ));
     assert_eq!(after, base);
 }
 

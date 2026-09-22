@@ -92,8 +92,10 @@ placeholder are adapted from [ajfkdk/D-soter](https://github.com/ajfkdk/D-soter)
 `module/jni/dsoter.cpp` at commit
 [`6148e02ea5977cb95b5a162a405fc915e39c01db`](https://github.com/ajfkdk/D-soter/commit/6148e02ea5977cb95b5a162a405fc915e39c01db),
 licensed under Apache-2.0. The Rust implementation in `pif-spoof/src/soter.rs`
-and `pif-spoof/src/soter/` uses a separate native Binder stub and strict request
-parsing; no upstream prebuilt library or C++ runtime component is bundled.
+and `pif-spoof/src/soter/` implements all 13 reply contracts with a separate
+native Binder stub and bounded descriptor matching. Android 12/12L retain the
+NDK platform's standard AIDL header check. No upstream prebuilt library or C++
+runtime component is bundled.
 It shares only the existing Zygisk loader entry with PIF and does not alter
 KeyMint or injector routing. The fixed public key and zero-filled signatures
 are mock responses, not genuine attestation or payment credentials.

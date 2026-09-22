@@ -98,18 +98,21 @@ impl ZygiskModule for PifSpoofModule {
         let process = read_java_string(&mut env, args.nice_name);
         let data_dir = read_java_string(&mut env, args.app_data_dir);
         if is_soter_target(process.as_deref(), data_dir.as_deref()) {
+            soter::log("Soter Beta target selected: com.tencent.soter.soterserver");
             match api.with_companion(read_soter_from_companion) {
                 Ok(Ok(true)) => {
                     // Native Binder callbacks may outlive a partially installed
                     // hook. Keep the payload mapped once installation is attempted.
                     match soter::install(&mut api) {
-                        Ok(()) => log_android("Soter Beta hook installed; responses are simulated"),
-                        Err(error) => log_android(&format!("Soter Beta hook unavailable: {error}")),
+                        Ok(()) => soter::log("Soter Beta hook registered; awaiting specialization"),
+                        Err(error) => soter::log(&format!("Soter Beta hook unavailable: {error}")),
                     }
                 }
                 result => {
-                    if !matches!(result, Ok(Ok(false))) {
-                        log_android(&format!("Soter Beta companion unavailable: {result:?}"));
+                    if matches!(result, Ok(Ok(false))) {
+                        soter::log("Soter Beta is disabled");
+                    } else {
+                        soter::log(&format!("Soter Beta companion unavailable: {result:?}"));
                     }
                     api.set_option(ZygiskOption::DlCloseModuleLibrary);
                 }
@@ -184,6 +187,7 @@ impl ZygiskModule for PifSpoofModule {
         mut env: JNIEnv<'a>,
         _args: &'a AppSpecializeArgs<'a>,
     ) {
+        soter::activate();
         let Some(profile) = self
             .profile
             .lock()
@@ -1327,7 +1331,12 @@ unsafe extern "C" fn property_value_callback(
 
 fn is_soter_target(process: Option<&str>, data_dir: Option<&str>) -> bool {
     process == Some(SOTER_PROCESS)
-        && data_dir.is_some_and(|path| is_package_data_dir(path, SOTER_PROCESS))
+        // Some loaders have not populated app_data_dir at pre-specialization.
+        // The zygote-supplied name must still match the service process exactly.
+        && match data_dir {
+            None | Some("") => true,
+            Some(path) => is_package_data_dir(path, SOTER_PROCESS),
+        }
 }
 
 fn is_target_process(process: Option<&str>, data_dir: Option<&str>) -> bool {
@@ -1437,7 +1446,7 @@ fn companion(stream: &mut std::os::unix::net::UnixStream) {
         Vec::new()
     });
     let soter_enabled = pif_common::soter::read().unwrap_or_else(|error| {
-        log_android(&format!(
+        soter::log(&format!(
             "Soter Beta companion rejected configuration: {error}"
         ));
         false
@@ -1530,31 +1539,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn soter_requires_exact_process_and_own_data_directory() {
-        for path in [
-            "/data/user/0/com.tencent.soter.soterserver",
-            "/data/user_de/10/com.tencent.soter.soterserver",
-            "/data/data/com.tencent.soter.soterserver",
-        ] {
-            assert!(is_soter_target(Some(SOTER_PROCESS), Some(path)));
-        }
-        for process in [
-            "com.tencent.soter.soterserver:remote",
-            GMS_PROCESS,
-            VENDING_PROCESS,
-        ] {
-            assert!(!is_soter_target(
-                Some(process),
-                Some("/data/data/com.tencent.soter.soterserver")
-            ));
-        }
+    fn soter_accepts_own_or_unavailable_data_directory() {
         for path in [
             None,
             Some(""),
-            Some("/data/local/tmp/com.tencent.soter.soterserver"),
-            Some("/data/data/other.package"),
+            Some("/data/user/0/com.tencent.soter.soterserver"),
+            Some("/data/user_de/10/com.tencent.soter.soterserver"),
+            Some("/data/data/com.tencent.soter.soterserver"),
+            Some("/mnt/expand/volume/user/0/com.tencent.soter.soterserver"),
         ] {
-            assert!(!is_soter_target(Some(SOTER_PROCESS), path));
+            assert!(is_soter_target(Some(SOTER_PROCESS), path), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn soter_requires_exact_service_process_even_without_data_directory() {
+        for process in [
+            None,
+            Some(""),
+            Some("com.tencent.soter.soterserver:remote"),
+            Some("com.tencent.soter.soterserver.evil"),
+            Some(GMS_PROCESS),
+            Some(VENDING_PROCESS),
+        ] {
+            for path in [
+                None,
+                Some(""),
+                Some("/data/data/com.tencent.soter.soterserver"),
+            ] {
+                assert!(!is_soter_target(process, path), "{process:?}, {path:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn soter_rejects_mismatched_nonempty_data_directory() {
+        for path in [
+            "/data/local/tmp/com.tencent.soter.soterserver",
+            "/data/data/other.package",
+            "/data/data/com.tencent.soter.soterserver.evil",
+        ] {
+            assert!(!is_soter_target(Some(SOTER_PROCESS), Some(path)), "{path}");
         }
     }
 

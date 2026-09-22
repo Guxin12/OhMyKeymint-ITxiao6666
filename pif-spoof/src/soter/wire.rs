@@ -2,7 +2,6 @@ use std::sync::OnceLock;
 
 use super::{BAD_VALUE, DESCRIPTOR, MAX_REQUEST_BYTES, UNKNOWN_TRANSACTION};
 
-const SYSTEM_HEADER: u32 = 0x5359_5354;
 const SIGNATURE: [u8; 256] = [0; 256];
 const DEVICE: &[u8] = b"TEESIM-SOTER-0001";
 // D-Soter's public placeholder, not a private key or a device identity.
@@ -28,85 +27,22 @@ fn export_blob() -> &'static [u8] {
     })
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
-        let end = self.position.checked_add(count)?;
-        let bytes = self.bytes.get(self.position..end)?;
-        self.position = end;
-        Some(bytes)
-    }
-
-    fn int32(&mut self) -> Option<i32> {
-        Some(i32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
-
-    fn string(&mut self) -> Option<Option<&'a [u8]>> {
-        let count = self.int32()?;
-        if count == -1 {
-            return Some(None);
-        }
-        let count = usize::try_from(count).ok()?.checked_mul(2)?;
-        let value = self.take(count)?;
-        if self.take(2)? != [0, 0] {
-            return None;
-        }
-        self.take((4 - (self.position % 4)) % 4)?;
-        Some(Some(value))
-    }
-}
-
 pub(super) fn valid_request(code: u32, bytes: &[u8]) -> bool {
-    if bytes.len() > MAX_REQUEST_BYTES || !bytes.len().is_multiple_of(4) {
+    if !(1..=13).contains(&code) || bytes.len() > MAX_REQUEST_BYTES {
         return false;
     }
-    let mut reader = Reader { bytes, position: 0 };
-    let valid = (|| {
-        reader.take(8)?; // strict-mode policy and propagated work-source UID
-        if reader.int32()? as u32 != SYSTEM_HEADER {
-            return None;
-        }
-        let token = reader.string()??;
-        let expected = DESCRIPTOR.to_bytes();
-        if token.len() != expected.len() * 2
-            || !token
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .zip(expected)
-                .all(|(unit, byte)| *unit == [*byte, 0])
-        {
-            return None;
-        }
-        match code {
-            1..=3 | 7 => {
-                reader.int32()?;
-            }
-            4..=6 | 8 => {
-                reader.int32()?;
-                reader.string()?;
-            }
-            9 => {
-                reader.int32()?;
-                reader.string()?;
-                reader.string()?;
-            }
-            10 => {
-                reader.take(8)?;
-            }
-            11 | 12 => {}
-            13 => {
-                reader.string()?;
-            }
-            _ => return None,
-        }
-        (reader.position == bytes.len()).then_some(())
-    })();
-    valid.is_some()
+    // D-soter identifies the interface by its UTF-16 descriptor anywhere in the
+    // driver-validated payload. Its replies do not consume arguments: OEM AIDL
+    // extensions and additional fields must not silently select the real HAL.
+    let expected = DESCRIPTOR.to_bytes();
+    bytes.windows(expected.len() * 2).any(|token| {
+        token
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(expected)
+            .all(|(unit, byte)| *unit == [*byte, 0])
+    })
 }
 
 pub(super) trait Writer {

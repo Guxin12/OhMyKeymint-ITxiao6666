@@ -10,7 +10,7 @@ use std::{
     ptr,
     sync::{
         OnceLock,
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
     },
 };
 
@@ -21,7 +21,7 @@ mod wire;
 pub(crate) const PACKAGE: &str = "com.tencent.soter.soterserver";
 const DESCRIPTOR: &CStr = c"com.tencent.soter.soterserver.ISoterService";
 const MAX_READ_BYTES: usize = 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_REQUEST_BYTES: usize = MAX_READ_BYTES;
 const BINDER_WRITE_READ: i32 = 0xc030_6201u32 as i32;
 const BR_TRANSACTION: u32 = 0x8040_7202;
 const BR_TRANSACTION_SEC_CTX: u32 = 0x8048_7202;
@@ -67,6 +67,7 @@ type OnDestroy = unsafe extern "C" fn(*mut c_void);
 type OnTransact = unsafe extern "C" fn(*mut c_void, u32, *const c_void, *mut c_void) -> i32;
 type ClassDefine =
     unsafe extern "C" fn(*const c_char, OnCreate, OnDestroy, OnTransact) -> *mut c_void;
+type DisableInterfaceHeader = unsafe extern "C" fn(*mut c_void);
 type BinderNew = unsafe extern "C" fn(*const c_void, *mut c_void) -> *mut c_void;
 type BinderRef = unsafe extern "C" fn(*mut c_void);
 type ParcelCreate = unsafe extern "C" fn() -> *mut c_void;
@@ -110,9 +111,27 @@ struct NativeStub {
 }
 
 static NATIVE: OnceLock<Result<NativeStub, String>> = OnceLock::new();
-static INSTALL: OnceLock<Result<(), String>> = OnceLock::new();
+static INSTALL: OnceLock<Result<(usize, usize), String>> = OnceLock::new();
 static ORIGINAL_IOCTL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static MATCHED_CODES: AtomicU32 = AtomicU32::new(0);
+static REPLIED_CODES: AtomicU32 = AtomicU32::new(0);
+static FAILED_CODES: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn log(message: &str) {
+    let Ok(message) = std::ffi::CString::new(message) else {
+        return;
+    };
+    unsafe {
+        crate::__android_log_write(4, c"OhMyKeymint-Soter".as_ptr(), message.as_ptr());
+    }
+}
+
+fn log_code_once(codes: &AtomicU32, code: u32, event: &str) {
+    if (1..=13).contains(&code) && codes.fetch_or(1 << code, Ordering::Relaxed) & (1 << code) == 0 {
+        log(&format!("{event}: code={code}"));
+    }
+}
 
 /// The caller must retain the module after this call, including on failure:
 /// Zygisk may have installed the PLT hook before returning a commit error.
@@ -122,10 +141,12 @@ pub(crate) fn install(api: &mut ZygiskApi<'_, V4>) -> Result<(), String> {
             if size_of::<usize>() != 8 {
                 return Err("Soter Beta requires a 64-bit process".to_string());
             }
-            NATIVE
-                .get_or_init(load_native)
-                .as_ref()
-                .map_err(Clone::clone)?;
+            // Load libraries and register the PLT hook while Zygisk's API is
+            // available. Do not construct/parcel a Binder object here:
+            // flattenBinder creates IPCThreadState/ProcessState and opens the
+            // Binder driver before Android finishes specializing the child.
+            let ndk = library(c"libbinder_ndk.so")?;
+            let binder = library(c"libbinder.so")?;
             let maps = std::fs::read_to_string("/proc/self/maps")
                 .map_err(|error| format!("cannot inspect libbinder mapping: {error}"))?;
             let binder_maps = maps
@@ -162,10 +183,26 @@ pub(crate) fn install(api: &mut ZygiskApi<'_, V4>) -> Result<(), String> {
                     "libbinder does not import ioctl; Soter Beta stays inactive".to_string()
                 );
             }
-            ACTIVE.store(true, Ordering::Release);
-            Ok(())
+            Ok((ndk, binder))
         })
-        .clone()
+        .as_ref()
+        .map(|_| ())
+        .map_err(Clone::clone)
+}
+
+/// No Zygisk API is used here. Binder state is initialized only after Android
+/// has assigned the app's UID, SELinux context and file-descriptor state.
+pub(crate) fn activate() {
+    let Some(Ok((ndk, binder))) = INSTALL.get() else {
+        return;
+    };
+    match NATIVE.get_or_init(|| load_native(*ndk, *binder)) {
+        Ok(_) => {
+            ACTIVE.store(true, Ordering::Release);
+            log("Soter Beta hook active after specialization; responses are simulated");
+        }
+        Err(error) => log(&format!("Soter Beta native handler unavailable: {error}")),
+    }
 }
 
 unsafe extern "C" fn ioctl_hook(fd: i32, request: i32, argument: *mut c_void) -> i32 {
@@ -218,7 +255,13 @@ unsafe fn inspect_read(argument: *const WriteRead) {
                 transaction.data_size as usize,
             )
         };
-        retarget(transaction, data, native.target);
+        if retarget(transaction, data, native.target) {
+            log_code_once(
+                &MATCHED_CODES,
+                transaction.code,
+                "Soter request intercepted",
+            );
+        }
     });
 }
 
@@ -233,22 +276,22 @@ fn valid_pointer_range(pointer: u64, size: u64) -> bool {
 fn candidate(transaction: &Transaction) -> bool {
     (1..=13).contains(&transaction.code)
         && transaction.target != 0
-        && transaction.cookie != 0
-        // TF_ACCEPT_FDS and TF_CLEAR_BUF do not change the synchronous wire format.
-        && transaction.flags & !0x30 == 0
-        && transaction.offsets_size == 0
+        // The kernel owns and validates the payload and its object offsets.
+        // D-soter ignores argument objects and accepts all transaction flags.
         && transaction.data_size <= MAX_REQUEST_BYTES as u64
         && valid_pointer_range(transaction.buffer, transaction.data_size)
 }
 
-fn retarget(transaction: &mut Transaction, data: &[u8], target: Target) {
+fn retarget(transaction: &mut Transaction, data: &[u8], target: Target) -> bool {
     if candidate(transaction)
         && transaction.data_size as usize == data.len()
         && wire::valid_request(transaction.code, data)
     {
         transaction.target = target.ptr;
         transaction.cookie = target.cookie;
+        return true;
     }
+    false
 }
 
 fn valid_read_commands(bytes: &[u8]) -> bool {
@@ -304,14 +347,21 @@ fn library(name: &CStr) -> Result<usize, String> {
     // Handles stay resident with the callback and the native Binder stub.
     let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() {
-        return Err(format!("Soter Beta cannot load {}", name.to_string_lossy()));
+        let error = unsafe { libc::dlerror() };
+        let detail = if error.is_null() {
+            "unknown linker error".into()
+        } else {
+            unsafe { CStr::from_ptr(error) }.to_string_lossy()
+        };
+        return Err(format!(
+            "Soter Beta cannot load {}: {detail}",
+            name.to_string_lossy()
+        ));
     }
     Ok(handle as usize)
 }
 
-fn load_native() -> Result<NativeStub, String> {
-    let ndk = library(c"libbinder_ndk.so")?;
-    let binder = library(c"libbinder.so")?;
+fn load_native(ndk: usize, binder: usize) -> Result<NativeStub, String> {
     let view_platform = symbol(ndk, c"_Z26AParcel_viewPlatformParcelPK7AParcel").ok();
     let device_api_address = crate::resolve_symbol_address(c"android_get_device_api_level")
         .ok_or_else(|| "Soter Beta cannot identify the Android API level".to_string())?;
@@ -343,6 +393,14 @@ fn load_native() -> Result<NativeStub, String> {
     if class.is_null() {
         return Err("Soter Beta cannot define native Binder class".to_string());
     }
+    // Android 13+ supports legacy Binder interfaces without enforcing a
+    // particular header layout. Descriptor matching remains in our handler,
+    // as in D-soter. Android 12 retains the standard platform AIDL header check.
+    if sdk >= 33 {
+        let disable_header: DisableInterfaceHeader =
+            symbol(ndk, c"AIBinder_Class_disableInterfaceTokenHeader")?;
+        unsafe { disable_header(class) };
+    }
     let stub = unsafe { new(class, ptr::null_mut()) };
     if stub.is_null() {
         return Err("Soter Beta cannot allocate native Binder".to_string());
@@ -357,7 +415,7 @@ fn load_native() -> Result<NativeStub, String> {
         if status != 0 {
             return Err(format!("Soter Beta Binder carrier write failed: {status}"));
         }
-        let bytes = unsafe { api.bytes(carrier, ptr::null(), true, 1)? };
+        let bytes = unsafe { api.bytes(carrier, ptr::null(), true, Some(1))? };
         parse_carrier(bytes)
             .ok_or_else(|| "Soter Beta native Binder carrier is unsupported".to_string())
     })();
@@ -390,7 +448,7 @@ impl NativeApi {
         parcel: *const c_void,
         binder: *const c_void,
         owns: bool,
-        objects: usize,
+        objects: Option<usize>,
     ) -> Result<&'a [u8], String> {
         if parcel.is_null() {
             return Err("Soter Beta received a null Parcel".to_string());
@@ -412,7 +470,8 @@ impl NativeApi {
         let size = unsafe { (self.platform_size)(platform) };
         if size > MAX_REQUEST_BYTES
             || unsafe { (self.parcel_size)(parcel) } != size as i32
-            || unsafe { (self.platform_objects)(platform) } != objects
+            || objects
+                .is_some_and(|expected| unsafe { (self.platform_objects)(platform) != expected })
         {
             return Err(
                 "Soter Beta received an unsupported Parcel size or object count".to_string(),
@@ -440,20 +499,25 @@ unsafe extern "C" fn on_transact(
     input: *const c_void,
     output: *mut c_void,
 ) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_unwind(AssertUnwindSafe(|| {
         let Some(Ok(native)) = NATIVE.get() else {
             return UNKNOWN_TRANSACTION;
         };
         if binder as usize != native.binder || !(1..=13).contains(&code) {
             return UNKNOWN_TRANSACTION;
         }
-        let Ok(bytes) = (unsafe { native.api.bytes(input, binder, false, 0) }) else {
+        let Ok(bytes) = (unsafe { native.api.bytes(input, binder, false, None) }) else {
             return BAD_VALUE;
         };
         if !wire::valid_request(code, bytes) {
             return BAD_VALUE;
         }
-        let Ok(reply) = (unsafe { native.api.bytes(output, binder, false, 0) }) else {
+        // A one-way call has no reply to deliver. The upstream stub accepts it
+        // without invoking the original service.
+        if output.is_null() {
+            return 0;
+        }
+        let Ok(reply) = (unsafe { native.api.bytes(output, binder, false, Some(0)) }) else {
             return BAD_VALUE;
         };
         if !reply.is_empty() {
@@ -468,7 +532,17 @@ unsafe extern "C" fn on_transact(
         )
         .map_or_else(|status| status, |()| 0)
     }))
-    .unwrap_or(-libc::EFAULT)
+    .unwrap_or(-libc::EFAULT);
+    if result == 0 {
+        log_code_once(&REPLIED_CODES, code, "Soter simulated reply delivered");
+    } else {
+        log_code_once(
+            &FAILED_CODES,
+            code,
+            &format!("Soter reply failed (status={result})"),
+        );
+    }
+    result
 }
 
 struct NativeWriter<'a> {
