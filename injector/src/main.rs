@@ -245,7 +245,10 @@ pub extern "C" fn entry(handle: *const c_void) -> bool {
         error!("failed to initialize OMK RPC session: {error:#}");
         return false;
     }
-    hook::init_hook().expect("failed to initialize binder ioctl hook");
+    if let Err(error) = hook::init_hook() {
+        error!("failed to initialize binder ioctl hook: {error:#}");
+        return false;
+    }
     true
 }
 

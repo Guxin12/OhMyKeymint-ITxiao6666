@@ -527,7 +527,10 @@ fn check_rsa_params(params: &[KeyParam]) -> Result<(), Error> {
                 KeyPurpose::AttestKey => seen_attest = true,
                 KeyPurpose::Verify | KeyPurpose::Encrypt => {} // public key operations
                 KeyPurpose::AgreeKey => {
-                    warn!("Generating RSA key with invalid purpose {purpose:?}")
+                    return Err(km_err!(
+                        IncompatiblePurpose,
+                        "invalid purpose {purpose:?} for RSA key"
+                    ));
                 }
             }
         }
@@ -743,7 +746,12 @@ fn check_ec_params(
                 KeyPurpose::AgreeKey => seen_agree = true,
                 KeyPurpose::AttestKey => seen_attest = true,
                 KeyPurpose::Verify => {}
-                _ => warn!("Generating EC key with invalid purpose {purpose:?}"),
+                _ => {
+                    return Err(km_err!(
+                        IncompatiblePurpose,
+                        "invalid purpose {purpose:?} for EC key"
+                    ));
+                }
             }
             if primary_purpose.is_none() {
                 primary_purpose = Some(*purpose);
@@ -841,7 +849,12 @@ fn check_mldsa_params(params: &[KeyParam], sec_level: SecurityLevel) -> Result<(
                 KeyPurpose::Sign => seen_sign = true,
                 KeyPurpose::AttestKey => seen_attest = true,
                 KeyPurpose::Verify => {}
-                _ => warn!("Generating ML-DSA key with invalid purpose {purpose:?}"),
+                _ => {
+                    return Err(km_err!(
+                        IncompatiblePurpose,
+                        "invalid purpose {purpose:?} for ML-DSA key"
+                    ));
+                }
             }
         }
     }

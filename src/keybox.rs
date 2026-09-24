@@ -312,7 +312,24 @@ impl KeyBox {
             bail!("EC certificate chain is empty");
         }
         let key = ec::import_sec1_private_key(&entry.key_der)
+            .or_else(|_| ec::import_pkcs8_key(&entry.key_der))
             .map_err(|e| anyhow!("failed to import EC private key: {e:?}"))?;
+        // Both importers return SEC1 key material with the named curve present.
+        // Keep that encoding for XML export and identity hashing, so a PKCS#8
+        // wrapper cannot retire entries bound to the same keybox.
+        let key_der = match &key {
+            KeyMaterial::Ec(
+                _,
+                _,
+                OpaqueOr::Explicit(
+                    ec::Key::P224(key)
+                    | ec::Key::P256(key)
+                    | ec::Key::P384(key)
+                    | ec::Key::P521(key),
+                ),
+            ) => key.0.clone(),
+            _ => bail!("EC private key import returned non-NIST key material"),
+        };
         let chain: Vec<keymint::Certificate> = entry
             .chain
             .into_iter()
@@ -323,7 +340,7 @@ impl KeyBox {
         validate_chain_matches_key(&key, &chain, KeyAlgorithm::Ec)?;
         Ok(CertSignAlgoInfo {
             key,
-            key_der: entry.key_der,
+            key_der,
             chain,
         })
     }
@@ -2040,6 +2057,30 @@ w1IdYIg2Wxg7yHcQZemFQg==
         keybox
     }
 
+    fn pkcs8_private_key(info: &CertSignAlgoInfo, key_der: &[u8]) -> Vec<u8> {
+        #[derive(der::Sequence)]
+        struct PrivateKeyInfo {
+            version: u8,
+            algorithm: x509_cert::spki::AlgorithmIdentifierOwned,
+            private_key: der::asn1::OctetString,
+        }
+
+        let certificate =
+            <Certificate as x509_der::Decode>::from_der(&info.chain[0].encoded_certificate)
+                .unwrap();
+        PrivateKeyInfo {
+            version: 0,
+            algorithm: certificate
+                .tbs_certificate()
+                .subject_public_key_info()
+                .algorithm
+                .clone(),
+            private_key: der::asn1::OctetString::new(key_der).unwrap(),
+        }
+        .to_der()
+        .unwrap()
+    }
+
     #[test]
     fn ec_only_keybox_signs_rsa_and_ec_attestations_with_ec_key() {
         let ec_only = single_algorithm_keybox(KeyAlgorithm::Ec);
@@ -2067,6 +2108,118 @@ w1IdYIg2Wxg7yHcQZemFQg==
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn ec_pkcs8_import_preserves_identity_and_sec1_export() {
+        #[derive(der::Sequence)]
+        struct EcPrivateKey {
+            version: u8,
+            private_key: der::asn1::OctetString,
+            #[asn1(context_specific = "0", tag_mode = "EXPLICIT", optional = "true")]
+            parameters: Option<der::asn1::ObjectIdentifier>,
+            #[asn1(context_specific = "1", tag_mode = "EXPLICIT", optional = "true")]
+            public_key: Option<der::asn1::BitString>,
+        }
+
+        for keybox in [KeyBox::new(), single_algorithm_keybox(KeyAlgorithm::Ec)] {
+            let ec_info = keybox.ec_info.as_ref().unwrap();
+            let sec1_xml = keybox.to_xml_string();
+            let mut inner = <EcPrivateKey as der::Decode>::from_der(&ec_info.key_der).unwrap();
+            assert!(inner.parameters.take().is_some());
+            let without_parameters = inner.to_der().unwrap();
+
+            // PKCS#8 may carry the curve only in its outer AlgorithmIdentifier.
+            for inner_der in [ec_info.key_der.as_slice(), without_parameters.as_slice()] {
+                let pkcs8 = pkcs8_private_key(ec_info, inner_der);
+                let pkcs8_xml = sec1_xml.replacen(
+                    &encode_pem_block("EC PRIVATE KEY", &ec_info.key_der),
+                    &encode_pem_block("PRIVATE KEY", &pkcs8),
+                    1,
+                );
+                assert_ne!(pkcs8_xml, sec1_xml);
+                validate_keybox_xml(pkcs8_xml.as_bytes()).unwrap();
+                let parsed = KeyBox::from_xml_str(&pkcs8_xml).unwrap();
+                assert_eq!(parsed.rsa_info.is_some(), keybox.rsa_info.is_some());
+                assert_eq!(parsed.identity_digest(), keybox.identity_digest());
+                assert_eq!(parsed.to_xml_string(), sec1_xml);
+                assert_eq!(
+                    parsed.certificate_serials().unwrap(),
+                    keybox.certificate_serials().unwrap()
+                );
+                for algo_hint in [SigningAlgorithm::Rsa, SigningAlgorithm::Ec] {
+                    let snapshot = parsed
+                        .signing_info(SigningKeyType {
+                            which: SigningKey::Batch,
+                            algo_hint,
+                        })
+                        .unwrap();
+                    let algorithm = if keybox.rsa_info.is_some()
+                        && matches!(algo_hint, SigningAlgorithm::Rsa)
+                    {
+                        assert!(matches!(&snapshot.signing_key, KeyMaterial::Rsa(_)));
+                        KeyAlgorithm::Rsa
+                    } else {
+                        assert!(matches!(&snapshot.signing_key, KeyMaterial::Ec(_, _, _)));
+                        KeyAlgorithm::Ec
+                    };
+                    validate_chain_matches_key(
+                        &snapshot.signing_key,
+                        &snapshot.cert_chain,
+                        algorithm,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ec_pkcs8_import_rejects_invalid_keys_and_mismatched_certificates() {
+        let ec_only = single_algorithm_keybox(KeyAlgorithm::Ec);
+        let ec_info = ec_only.ec_info.as_ref().unwrap();
+        let sec1_xml = ec_only.to_xml_string();
+        let sec1_pem = encode_pem_block("EC PRIVATE KEY", &ec_info.key_der);
+        let pkcs8 = pkcs8_private_key(ec_info, &ec_info.key_der);
+        let bundled = KeyBox::new();
+        let rsa_info = bundled.rsa_info.as_ref().unwrap();
+        for invalid_key in [
+            vec![0x30, 0x00],
+            pkcs8[..pkcs8.len() - 1].to_vec(),
+            pkcs8_private_key(rsa_info, &rsa_info.key_der),
+        ] {
+            let invalid_xml =
+                sec1_xml.replacen(&sec1_pem, &encode_pem_block("PRIVATE KEY", &invalid_key), 1);
+            assert!(validate_keybox_xml(invalid_xml.as_bytes()).is_err());
+        }
+
+        let pkcs8_xml = sec1_xml.replacen(&sec1_pem, &encode_pem_block("PRIVATE KEY", &pkcs8), 1);
+        let other_key = KeyPair::generate().unwrap();
+        let other_certificate = CertificateParams::new(Vec::new())
+            .unwrap()
+            .self_signed(&other_key)
+            .unwrap();
+        let mismatch = pkcs8_xml.replacen(
+            &encode_pem_block("CERTIFICATE", &ec_info.chain[0].encoded_certificate),
+            &encode_pem_block("CERTIFICATE", other_certificate.der()),
+            1,
+        );
+        let error = validate_keybox_xml(mismatch.as_bytes()).unwrap_err();
+        assert!(format!("{error:#}").contains("does not match the supplied private key"));
+
+        let wrong_count = pkcs8_xml.replacen(
+            &format!(
+                "<NumberOfCertificates>{}</NumberOfCertificates>",
+                ec_info.chain.len()
+            ),
+            &format!(
+                "<NumberOfCertificates>{}</NumberOfCertificates>",
+                ec_info.chain.len() + 1
+            ),
+            1,
+        );
+        let error = validate_keybox_xml(wrong_count.as_bytes()).unwrap_err();
+        assert!(format!("{error:#}").contains("certificate count mismatch"));
     }
 
     #[test]
@@ -2105,29 +2258,9 @@ w1IdYIg2Wxg7yHcQZemFQg==
 
     #[test]
     fn rsa_only_pkcs8_import_preserves_identity_and_pkcs1_export() {
-        #[derive(der::Sequence)]
-        struct PrivateKeyInfo {
-            version: u8,
-            algorithm: x509_cert::spki::AlgorithmIdentifierOwned,
-            private_key: der::asn1::OctetString,
-        }
-
         let rsa_only = single_algorithm_keybox(KeyAlgorithm::Rsa);
         let rsa_info = rsa_only.rsa_info.as_ref().unwrap();
-        let certificate =
-            <Certificate as x509_der::Decode>::from_der(&rsa_info.chain[0].encoded_certificate)
-                .unwrap();
-        let pkcs8 = PrivateKeyInfo {
-            version: 0,
-            algorithm: certificate
-                .tbs_certificate()
-                .subject_public_key_info()
-                .algorithm
-                .clone(),
-            private_key: der::asn1::OctetString::new(rsa_info.key_der.clone()).unwrap(),
-        }
-        .to_der()
-        .unwrap();
+        let pkcs8 = pkcs8_private_key(rsa_info, &rsa_info.key_der);
         let pkcs1_xml = rsa_only.to_xml_string();
         let pkcs8_xml = pkcs1_xml.replace(
             &encode_pem_block("RSA PRIVATE KEY", &rsa_info.key_der),
@@ -2169,6 +2302,33 @@ w1IdYIg2Wxg7yHcQZemFQg==
 
     #[test]
     fn rsa_only_keybox_produces_verifiable_rsa_and_ec_attestations() {
+        assert_keybox_produces_verifiable_rsa_and_ec_attestations(
+            single_algorithm_keybox(KeyAlgorithm::Rsa),
+            KeyAlgorithm::Rsa,
+        );
+    }
+
+    #[test]
+    fn ec_only_pkcs8_keybox_produces_verifiable_rsa_and_ec_attestations() {
+        let ec_only = single_algorithm_keybox(KeyAlgorithm::Ec);
+        let ec_info = ec_only.ec_info.as_ref().unwrap();
+        let pkcs8 = pkcs8_private_key(ec_info, &ec_info.key_der);
+        let sec1_xml = ec_only.to_xml_string();
+        let pkcs8_xml = sec1_xml.replacen(
+            &encode_pem_block("EC PRIVATE KEY", &ec_info.key_der),
+            &encode_pem_block("PRIVATE KEY", &pkcs8),
+            1,
+        );
+        assert_ne!(pkcs8_xml, sec1_xml);
+        let imported = KeyBox::from_xml_str(&pkcs8_xml).unwrap();
+        assert!(imported.rsa_info.is_none());
+        assert_keybox_produces_verifiable_rsa_and_ec_attestations(imported, KeyAlgorithm::Ec);
+    }
+
+    fn assert_keybox_produces_verifiable_rsa_and_ec_attestations(
+        keybox: KeyBox,
+        signer: KeyAlgorithm,
+    ) {
         use crate::keymaster::keymint_device::tests::{set_boot_info, test_ta};
         use kmr_wire::{
             keymint::{Algorithm, DateTime, Digest, EcCurve, KeyParam, KeyPurpose, PaddingMode},
@@ -2183,8 +2343,16 @@ w1IdYIg2Wxg7yHcQZemFQg==
             }
         }
 
-        let keybox = single_algorithm_keybox(KeyAlgorithm::Rsa);
-        let expected_chain = keybox.rsa_info.as_ref().unwrap().chain.clone();
+        let (expected_chain, expected_signature_oid) = match signer {
+            KeyAlgorithm::Rsa => (
+                keybox.rsa_info.as_ref().unwrap().chain.clone(),
+                "1.2.840.113549.1.1.11",
+            ),
+            KeyAlgorithm::Ec => (
+                keybox.ec_info.as_ref().unwrap().chain.clone(),
+                "1.2.840.10045.4.3.2",
+            ),
+        };
         let mut ta = test_ta();
         assert_eq!(set_boot_info(&mut ta), 0);
         assert_eq!(
@@ -2204,7 +2372,7 @@ w1IdYIg2Wxg7yHcQZemFQg==
                 KeyParam::Purpose(KeyPurpose::Sign),
                 KeyParam::Digest(Digest::Sha256),
                 KeyParam::NoAuthRequired,
-                KeyParam::AttestationChallenge(b"rsa-only-keybox".to_vec()),
+                KeyParam::AttestationChallenge(b"single-algorithm-keybox".to_vec()),
                 KeyParam::AttestationApplicationId(b"test".to_vec()),
                 KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
                 KeyParam::CertificateNotAfter(DateTime {
@@ -2235,21 +2403,26 @@ w1IdYIg2Wxg7yHcQZemFQg==
             let (_, issuer) = parse_x509_certificate(&chain[1].encoded_certificate).unwrap();
             assert_eq!(
                 leaf.signature_algorithm.algorithm.to_id_string(),
-                "1.2.840.113549.1.1.11"
+                expected_signature_oid
             );
             assert_eq!(leaf.issuer(), issuer.subject());
-            // The bundled test signer is 1024-bit; x509-parser's default
-            // RSA verifier requires 2048 bits. Verify this fixture explicitly
-            // without changing production certificate-validation policy.
-            ring::signature::UnparsedPublicKey::new(
-                &ring::signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
-                issuer.public_key().subject_public_key.data.as_ref(),
-            )
-            .verify(
-                leaf.tbs_certificate.as_ref(),
-                leaf.signature_value.data.as_ref(),
-            )
-            .unwrap();
+            match signer {
+                KeyAlgorithm::Rsa => {
+                    // The bundled RSA signer is 1024-bit; x509-parser's default
+                    // verifier requires 2048 bits. Verify this fixture explicitly
+                    // without changing production certificate-validation policy.
+                    ring::signature::UnparsedPublicKey::new(
+                        &ring::signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
+                        issuer.public_key().subject_public_key.data.as_ref(),
+                    )
+                    .verify(
+                        leaf.tbs_certificate.as_ref(),
+                        leaf.signature_value.data.as_ref(),
+                    )
+                    .unwrap();
+                }
+                KeyAlgorithm::Ec => leaf.verify_signature(Some(issuer.public_key())).unwrap(),
+            }
             let subject_oid = leaf.public_key().algorithm.algorithm.to_id_string();
             assert_eq!(
                 subject_oid,

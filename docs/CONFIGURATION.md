@@ -347,6 +347,11 @@ RSA-only, EC-only, and combined keyboxes are supported. When only one algorithm
 is present, its key signs attestation leaves for both RSA and EC subject keys.
 RSA private keys accept unencrypted PKCS#1 or PKCS#8 PEM encoding and normalize
 to PKCS#1 for identity hashing and XML export.
+EC private keys accept unencrypted SEC1 or PKCS#8 PEM encoding and normalize
+to SEC1 for identity hashing and XML export. Adding or removing only the
+PKCS#8 wrapper preserves the keybox identity when the inner SEC1 fields and
+certificate chain are unchanged. A named curve carried only in the PKCS#8
+algorithm identifier is restored into the SEC1 parameters.
 The reload preserves ordinary application signing keys, including passkey
 credentials. Only dedicated `ATTEST_KEY` entries tied to the previous keybox
 are retired.
@@ -1068,7 +1073,8 @@ Isolated Android service callers use the system ActivityManager process record
 for package attribution when ordinary UID package lookup has no result. The
 privileged helper matches the Binder caller PID and checks its kernel UID and
 process start time before and after the lookup. Only the process package list
-affects the existing package filter; dependency packages are excluded. The
+affects the existing package filter; dependency packages are excluded. Null
+package-list entries are ignored; present package names must pass validation. The
 original isolated UID, PID, and SELinux identity remain authoritative for key
 permissions. Failed or unsupported lookups retain unknown-package behavior.
 The ActivityManager transaction number is read from the installed system
@@ -1091,6 +1097,12 @@ Overlapping `updateAad`, `update`, `finish`, or `abort` calls on the same handle
 return `OPERATION_BUSY` (19) while another call is in progress. A busy response
 leaves that operation usable. Each operation has its own concurrency guard,
 so calls on different handles do not contend on this guard.
+
+The software TA allocates 32 concurrent operation slots for an AIDL KeyMint
+TEE profile and 16 for a legacy Keymaster TEE profile. StrongBox profiles
+retain four slots. A full TA table returns `TOO_MANY_OPERATIONS` to the
+existing Keystore2 pruning path; `finish` and `abort` release their slots.
+These limits do not change request routing or provide hardware isolation.
 
 #### `get_security_level`
 

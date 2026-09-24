@@ -1876,9 +1876,19 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn test_ta() -> KeyMintTa {
+        test_ta_with_profile(
+            KeyMintDevice::KEY_MINT_V5,
+            kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
+        )
+    }
+
+    fn test_ta_with_profile(
+        version_number: i32,
+        security_level: kmr_wire::keymint::SecurityLevel,
+    ) -> KeyMintTa {
         let hw_info = HardwareInfo {
-            version_number: KeyMintDevice::KEY_MINT_V5,
-            security_level: kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
+            version_number,
+            security_level,
             impl_name: "test",
             author_name: "test",
             unique_id: "test",
@@ -1930,6 +1940,135 @@ pub(crate) mod tests {
         assert_eq!(resp.error_code, 0);
 
         assert_eq!(set_boot_info(&mut ta), ErrorCode::EARLY_BOOT_ENDED.0);
+    }
+
+    #[test]
+    fn operation_capacity_matches_hal_profile_and_reuses_released_slots() {
+        use kmr_wire::keymint::{Algorithm, Digest, KeyPurpose, SecurityLevel};
+
+        for (version, tee_capacity) in [
+            (30, 16),
+            (40, 16),
+            (41, 16),
+            (KeyMintDevice::KEY_MINT_V1, 32),
+            (KeyMintDevice::KEY_MINT_V2, 32),
+            (KeyMintDevice::KEY_MINT_V3, 32),
+            (KeyMintDevice::KEY_MINT_V4, 32),
+            (KeyMintDevice::KEY_MINT_V5, 32),
+        ] {
+            for (level, capacity) in [
+                (SecurityLevel::TrustedEnvironment, tee_capacity),
+                (SecurityLevel::Strongbox, 4),
+            ] {
+                let mut ta = test_ta_with_profile(version, level);
+                assert_eq!(set_boot_info(&mut ta), 0);
+                assert_eq!(
+                    ta.process_req(PerformOpReq::SetHalInfo(SetHalInfoRequest {
+                        os_version: 150000,
+                        os_patchlevel: 202506,
+                        vendor_patchlevel: 20250605,
+                    }))
+                    .error_code,
+                    0
+                );
+                let generated =
+                    ta.process_req(PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+                        key_params: vec![
+                            KeyParam::Purpose(KeyPurpose::Sign),
+                            KeyParam::Algorithm(Algorithm::Hmac),
+                            KeyParam::KeySize(KeySizeInBits(256)),
+                            KeyParam::Digest(Digest::Sha256),
+                            KeyParam::MinMacLength(128),
+                            KeyParam::NoAuthRequired,
+                        ],
+                        attestation_key: None,
+                    }));
+                assert_eq!(generated.error_code, 0, "{level:?} v{version}");
+                let key_blob = match generated.rsp {
+                    Some(PerformOpRsp::DeviceGenerateKey(response)) => response.ret.key_blob,
+                    response => panic!("unexpected generate response: {response:?}"),
+                };
+                let begin = |ta: &mut KeyMintTa| {
+                    ta.process_req(PerformOpReq::DeviceBegin(BeginRequest {
+                        purpose: KeyPurpose::Sign,
+                        key_blob: key_blob.clone(),
+                        params: vec![KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(128)],
+                        auth_token: None,
+                    }))
+                };
+                let mut handles = Vec::new();
+                for slot in 0..capacity {
+                    let response = begin(&mut ta);
+                    assert_eq!(response.error_code, 0, "{level:?} v{version} slot {slot}");
+                    match response.rsp {
+                        Some(PerformOpRsp::DeviceBegin(response)) => {
+                            handles.push(response.ret.op_handle);
+                        }
+                        response => panic!("unexpected begin response: {response:?}"),
+                    }
+                }
+                assert_eq!(
+                    begin(&mut ta).error_code,
+                    ErrorCode::TOO_MANY_OPERATIONS.0,
+                    "{level:?} v{version} must reject operations beyond {capacity}"
+                );
+                // Abort and finish both release slots without disturbing other operations.
+                let aborted = handles.remove(0);
+                assert_eq!(
+                    ta.process_req(PerformOpReq::OperationAbort(AbortRequest {
+                        op_handle: aborted,
+                    }))
+                    .error_code,
+                    0
+                );
+                let replacement = begin(&mut ta);
+                assert_eq!(replacement.error_code, 0);
+                match replacement.rsp {
+                    Some(PerformOpRsp::DeviceBegin(response)) => {
+                        handles.push(response.ret.op_handle);
+                    }
+                    response => panic!("unexpected begin response: {response:?}"),
+                }
+                assert_eq!(begin(&mut ta).error_code, ErrorCode::TOO_MANY_OPERATIONS.0);
+                for op_handle in handles {
+                    assert_eq!(
+                        ta.process_req(PerformOpReq::OperationFinish(FinishRequest {
+                            op_handle,
+                            input: Some(b"capacity regression".to_vec()),
+                            signature: None,
+                            auth_token: None,
+                            timestamp_token: None,
+                            confirmation_token: None,
+                        }))
+                        .error_code,
+                        0,
+                        "{level:?} v{version} existing operations must remain usable"
+                    );
+                }
+                let mut reused_handles = Vec::new();
+                for slot in 0..capacity {
+                    let after_finish = begin(&mut ta);
+                    assert_eq!(
+                        after_finish.error_code, 0,
+                        "{level:?} v{version} finished slot {slot} must be reusable"
+                    );
+                    match after_finish.rsp {
+                        Some(PerformOpRsp::DeviceBegin(response)) => {
+                            reused_handles.push(response.ret.op_handle);
+                        }
+                        response => panic!("unexpected begin response: {response:?}"),
+                    }
+                }
+                assert_eq!(begin(&mut ta).error_code, ErrorCode::TOO_MANY_OPERATIONS.0);
+                for op_handle in reused_handles {
+                    assert_eq!(
+                        ta.process_req(PerformOpReq::OperationAbort(AbortRequest { op_handle }))
+                            .error_code,
+                        0
+                    );
+                }
+            }
+        }
     }
 
     #[test]

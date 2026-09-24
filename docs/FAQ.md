@@ -381,6 +381,12 @@ entry. RSA-only keyboxes are also supported without an added EC entry. RSA
 private keys can use unencrypted PKCS#1 (`RSA PRIVATE KEY`) or PKCS#8
 (`PRIVATE KEY`) PEM encoding. Both encodings use the same keybox identity when
 the private key and certificate chain are unchanged; XML export uses PKCS#1.
+EC private keys can use unencrypted SEC1 (`EC PRIVATE KEY`) or PKCS#8
+(`PRIVATE KEY`) PEM encoding. Both normalize to SEC1 for identity hashing and
+XML export. Adding or removing the PKCS#8 wrapper without changing the inner
+SEC1 fields or certificate chain preserves the keybox identity. Missing inner
+curve parameters are filled from the PKCS#8 algorithm identifier; other optional
+SEC1 fields are not regenerated.
 The file must also be clean XML, without watermarks, comments inserted
 into key data, invisible characters, or other extra content.
 

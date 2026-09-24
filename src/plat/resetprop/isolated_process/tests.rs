@@ -79,7 +79,7 @@ fn write_record(
     layout: ProcessParcelLayout,
     pid: i32,
     owner: i32,
-    package: &str,
+    packages: &[Option<&str>],
 ) {
     parcel.write(&1i32).unwrap(); // non-null typed-list item
     let start = parcel.data_position();
@@ -89,7 +89,10 @@ fn write_record(
     parcel.write(&"untrusted:process-name".to_owned()).unwrap();
     parcel.write(&pid).unwrap();
     parcel.write(&owner).unwrap();
-    parcel.write(&vec![package.to_owned()]).unwrap();
+    parcel.write(&(packages.len() as i32)).unwrap();
+    for package in packages {
+        parcel.write(&package.map(str::to_owned)).unwrap();
+    }
     if layout != ProcessParcelLayout::Legacy {
         parcel
             .write(&vec!["com.dependencies.must.not.be.used".to_owned()])
@@ -120,8 +123,8 @@ fn list(layout: ProcessParcelLayout, owner: i32) -> Parcel {
     let mut parcel = Parcel::new();
     parcel.write(&3i32).unwrap();
     parcel.write(&0i32).unwrap(); // legitimate null list item
-    write_record(&mut parcel, layout, 41, 10001, "com.unrelated");
-    write_record(&mut parcel, layout, 42, owner, "com.example.owner");
+    write_record(&mut parcel, layout, 41, 10001, &[Some("com.unrelated")]);
+    write_record(&mut parcel, layout, 42, owner, &[Some("com.example.owner")]);
     parcel.set_data_position(0);
     parcel
 }
@@ -147,12 +150,74 @@ fn all_android_layouts_use_pid_and_packages_not_owner_uid_or_dependencies() {
 }
 
 #[test]
+fn null_package_names_preserve_later_process_matches_and_valid_packages() {
+    for layout in [
+        ProcessParcelLayout::Legacy,
+        ProcessParcelLayout::WithDependencies,
+        ProcessParcelLayout::Structured,
+    ] {
+        let mut parcel = Parcel::new();
+        parcel.write(&2i32).unwrap();
+        write_record(&mut parcel, layout, 41, 10001, &[None]);
+        write_record(
+            &mut parcel,
+            layout,
+            42,
+            10371,
+            &[
+                None,
+                Some("com.example.shared"),
+                None,
+                Some("com.example.owner"),
+                None,
+            ],
+        );
+        parcel.set_data_position(0);
+        assert_eq!(
+            read_matching_packages(&mut parcel, layout, 99001, 42).unwrap(),
+            ["com.example.owner", "com.example.shared"]
+        );
+
+        parcel.set_data_position(0);
+        assert!(read_matching_packages(&mut parcel, layout, 99001, 41)
+            .unwrap()
+            .is_empty());
+        parcel.set_data_position(0);
+        assert!(read_matching_packages(&mut parcel, layout, 199001, 42).is_err());
+    }
+}
+
+#[test]
+fn null_package_names_do_not_hide_invalid_present_packages() {
+    let layout = ProcessParcelLayout::WithDependencies;
+    for package in ["", "com..example"] {
+        let mut parcel = Parcel::new();
+        parcel.write(&1i32).unwrap();
+        write_record(&mut parcel, layout, 42, 10371, &[None, Some(package)]);
+        parcel.set_data_position(0);
+        assert!(read_matching_packages(&mut parcel, layout, 99001, 42).is_err());
+    }
+}
+
+#[test]
 fn ambiguous_or_malformed_process_lists_are_not_accepted() {
     let layout = ProcessParcelLayout::WithDependencies;
     let mut duplicate = Parcel::new();
     duplicate.write(&2i32).unwrap();
-    write_record(&mut duplicate, layout, 42, 10371, "com.example.first");
-    write_record(&mut duplicate, layout, 42, 10372, "com.example.second");
+    write_record(
+        &mut duplicate,
+        layout,
+        42,
+        10371,
+        &[Some("com.example.first")],
+    );
+    write_record(
+        &mut duplicate,
+        layout,
+        42,
+        10372,
+        &[Some("com.example.second")],
+    );
     duplicate.set_data_position(0);
     assert!(read_matching_packages(&mut duplicate, layout, 99001, 42).is_err());
     let mut trailing = list(layout, 10371);

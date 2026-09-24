@@ -78,8 +78,11 @@ pub enum KeyMintHalVersion {
 /// Version code for current KeyMint.
 pub const KEYMINT_CURRENT_VERSION: KeyMintHalVersion = KeyMintHalVersion::V5;
 
-/// Maximum number of parallel operations supported when running as TEE.
-const MAX_TEE_OPERATIONS: usize = 16;
+/// Maximum number of parallel TEE operations for legacy Keymaster profiles.
+const MAX_KEYMASTER_TEE_OPERATIONS: usize = 16;
+
+/// Maximum number of parallel TEE operations for AIDL KeyMint profiles.
+const MAX_KEYMINT_TEE_OPERATIONS: usize = 32;
 
 /// Maximum number of parallel operations supported when running as StrongBox.
 const MAX_STRONGBOX_OPERATIONS: usize = 4;
@@ -337,8 +340,10 @@ impl KeyMintTa {
     ) -> Self {
         let max_operations = if hw_info.security_level == SecurityLevel::Strongbox {
             MAX_STRONGBOX_OPERATIONS
+        } else if hw_info.version_number >= KeyMintHalVersion::V1 as i32 {
+            MAX_KEYMINT_TEE_OPERATIONS
         } else {
-            MAX_TEE_OPERATIONS
+            MAX_KEYMASTER_TEE_OPERATIONS
         };
         Self {
             imp,
