@@ -176,6 +176,7 @@
     <string name="tools_wechat_soter_desc">配置Qualcomm Soter服务</string>
     <string name="tools_soter_hal">Soter HAL 配置</string>
     <string name="soter_hal_desc">配置Qualcomm Soter服务</string>
+    <string name="soter_hal_warning">该功能可能会造成抖音账户概率性封禁，以及其它未知问题，如果您要开启该功能请酌情考虑！</string>
     <string name="soter_hal_enabled">启用功能</string>
     <string name="soter_hal_saved">功能已启用</string>
     <string name="soter_hal_disabled">功能已关闭</string>

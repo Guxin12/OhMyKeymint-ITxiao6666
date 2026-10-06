@@ -184,8 +184,9 @@ fn client_message_re_roots_source_paths() {
 
 #[test]
 fn service_specific_message_hides_the_local_source_root() {
-    let e: anyhow::Result<()> = Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
-        .context(format!("{LOCAL_SOURCE_ROOT}security_level.rs:331 Malformed KeyParameter."));
+    let e: anyhow::Result<()> = Err(Error::Km(ErrorCode::INVALID_ARGUMENT)).context(format!(
+        "{LOCAL_SOURCE_ROOT}security_level.rs:331 Malformed KeyParameter."
+    ));
 
     let message = anyhow_error_to_cstring(&e.unwrap_err()).expect("message is a valid string");
 

@@ -176,6 +176,7 @@
     <string name="tools_wechat_soter_desc">Configure the Qualcomm Soter service.</string>
     <string name="tools_soter_hal">Soter HAL configuration</string>
     <string name="soter_hal_desc">Configure the Qualcomm Soter service.</string>
+    <string name="soter_hal_warning">This feature may cause probabilistic bans of Douyin accounts and other unknown issues. Please consider carefully before enabling it.</string>
     <string name="soter_hal_enabled">Enable feature</string>
     <string name="soter_hal_saved">Feature enabled</string>
     <string name="soter_hal_disabled">Feature disabled</string>

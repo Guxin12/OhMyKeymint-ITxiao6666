@@ -143,6 +143,9 @@ async function apply(): Promise<void> {
         <span>{{ tr('home_status_loading', 'Checking') }}</span>
       </div>
       <template v-else-if="status === 'ready'">
+        <p class="soter-hal-dialog__warning">
+          {{ tr('soter_hal_warning', 'This feature may cause probabilistic bans of Douyin accounts and other unknown issues. Please consider carefully before enabling it.') }}
+        </p>
         <MiuixSwitchPreference
           v-model="enabled"
           :title="tr('soter_hal_enabled', 'Enable feature')"
@@ -172,6 +175,7 @@ async function apply(): Promise<void> {
 <style scoped>
 .soter-hal-dialog { display: flex; flex-direction: column; gap: 14px; }
 .soter-hal-dialog p { margin: 0; color: var(--m-color-on-surface-variant-summary); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.soter-hal-dialog__warning { color: var(--m-color-on-surface) !important; }
 .soter-hal-dialog__loading { display: flex; min-height: 64px; align-items: center; justify-content: center; gap: 12px; color: var(--m-color-on-surface-variant-summary); }
 .soter-hal-dialog__error { color: var(--m-color-error) !important; }
 .soter-hal-dialog__actions { display: flex; gap: 12px; }
