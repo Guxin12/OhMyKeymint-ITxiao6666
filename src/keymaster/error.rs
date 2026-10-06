@@ -203,17 +203,16 @@ pub fn into_logged_binder(e: anyhow::Error) -> BinderStatus {
 /// `common::Error` once its derived `Debug` is formatted. This tree and a stock tree root those
 /// paths differently, so the prefix by itself tells a client which of them handled the request.
 const LOCAL_SOURCE_ROOT: &str = "src/keymaster/";
+const LOCAL_SOURCE_ROOT_WINDOWS: &str = "src\\keymaster\\";
 const STOCK_SOURCE_ROOT: &str = "system/security/keystore2/src/";
 
 /// Re-roots source paths in a diagnostic that is about to leave over binder.
 ///
 /// Only the message goes through this; `log_client_err!` still logs the error as raised.
 fn rewrite_source_root(formatted: String) -> String {
-    if formatted.contains(LOCAL_SOURCE_ROOT) {
-        formatted.replace(LOCAL_SOURCE_ROOT, STOCK_SOURCE_ROOT)
-    } else {
-        formatted
-    }
+    formatted
+        .replace(LOCAL_SOURCE_ROOT, STOCK_SOURCE_ROOT)
+        .replace(LOCAL_SOURCE_ROOT_WINDOWS, STOCK_SOURCE_ROOT)
 }
 
 /// This function turns an anyhow error into an optional CString.

@@ -177,6 +177,15 @@ fn client_message_re_roots_source_paths() {
     );
     assert!(!rewritten.contains(LOCAL_SOURCE_ROOT));
 
+    let windows =
+        format!("{LOCAL_SOURCE_ROOT_WINDOWS}security_level.rs:331 Malformed KeyParameter.");
+    let rewritten = rewrite_source_root(windows);
+    assert_eq!(
+        format!("{STOCK_SOURCE_ROOT}security_level.rs:331 Malformed KeyParameter."),
+        rewritten
+    );
+    assert!(!rewritten.contains(LOCAL_SOURCE_ROOT_WINDOWS));
+
     // A diagnostic that carries no source path is passed through untouched.
     let plain = String::from("Error::Km(INVALID_ARGUMENT)");
     assert_eq!(plain, rewrite_source_root(plain.clone()));
