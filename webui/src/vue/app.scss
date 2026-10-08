@@ -294,8 +294,8 @@ button { touch-action: manipulation; }
 .diagnostics-heading span { color: var(--m-color-on-surface-variant-summary); font-size: 13px; line-height: 1.4; }
 .diagnostics-refresh { min-height: 34px; padding: 6px 12px; font-size: 14px; flex-shrink: 0; margin-left: 10px; }
 .diagnostics-empty { min-height: 56px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--m-color-on-surface-variant-summary); }
-.diagnostics-services { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
-.diagnostics-service { min-width: 0; padding: 9px 10px; border-radius: 10px; background: color-mix(in srgb, var(--m-color-surface-container-high) 72%, transparent); }
+.diagnostics-services { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+.diagnostics-service { min-width: 0; padding: 9px 10px; }
 .diagnostics-service dt { color: var(--m-color-on-surface-variant-summary); font-size: 13px; line-height: 1.4; }
 .diagnostics-service dd { margin: 3px 0 0; color: var(--m-color-on-surface); font-size: 14px; font-weight: 600; line-height: 1.3; }
 .diagnostics-service dd[data-tone='ok'] { color: var(--m-color-primary); }
@@ -306,8 +306,10 @@ button { touch-action: manipulation; }
 .keybox-inspector h3 { margin: 0 0 8px; color: var(--m-color-on-surface); font-size: 14px; line-height: 1.35; }
 .diagnostics-muted { margin: 0; color: var(--m-color-on-surface-variant-summary); font-size: 13px; }
 .keybox-chains { display: grid; gap: 7px; }
-.keybox-chain { min-width: 0; overflow: hidden; border-radius: 12px; background: var(--m-color-surface-container-high); }
+.keybox-chain { min-width: 0; overflow: hidden; border-radius: 12px; background: transparent; }
 .keybox-chain .m-basic-component { min-height: 58px; padding: 10px 12px; }
+.keybox-chain .m-basic-component--clickable::after { content: none; }
+.keybox-chain .m-basic-component--clickable:focus-visible .keybox-chain__expand { box-shadow: 0 0 0 2px var(--m-color-primary); border-radius: 4px; }
 .keybox-chain .m-basic-component__center { min-width: 0; }
 .keybox-chain .m-basic-component__center .m-text:first-child { font-size: 15px; line-height: 1.4; }
 .keybox-chain .m-basic-component__center .m-text:last-child { font-size: 13px; line-height: 1.4; }

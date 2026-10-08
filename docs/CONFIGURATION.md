@@ -326,8 +326,9 @@ process refresh. The spoof is process-local: it does not call `resetprop`,
 change global Android properties, or change values under OMK's `[device]`
 section.
 
-**Tencent Soter compatibility (Beta)** is an optional simulation based on
-D-soter. Its switch is disabled by default and is independent of PIF, `scoop`,
+**Tencent Soter compatibility (Beta)** is an optional software test implementation
+of the D-soter Binder reply contract. Its switch is disabled by default and is
+independent of PIF, `scoop`,
 and all KeyMint routing and key storage. Applying the switch atomically stores
 one strict `0` or `1` byte in
 `/data/misc/keystore/omk/data/soter_beta.conf`. Opening or cancelling the dialog
@@ -341,26 +342,33 @@ Install and enable Zygisk Next separately. Restart the device after enabling or
 disabling Tencent Soter Beta; the compatibility experiment is not verified.
 
 **Soter HAL** is a separate Qualcomm integration for
-`vendor.qti.hardware.soter.ISoter/default`. Its WebUI panel exposes one switch
-for enabling the remote Soter relay; that switch also takes over the vendor HAL
-with the local software TA. The panel also exposes editable relay URL, B device
+`vendor.qti.hardware.soter.ISoter/default`. Its WebUI panel exposes independent
+switches for enabling the software TA and its remote Soter relay. Enabling the
+software TA takes over the vendor HAL. With the relay disabled, supported
+operations use the local ledger; with the relay enabled, they use the configured
+server. The panel also exposes editable relay URL, B device
 ID, token, and optional UID mapping fields, plus a switch to accept self-signed
 TLS certificates. Existing nonempty relay identity values are preserved; empty
 URL, B device ID, or token fields are filled with their built-in defaults when
-saved. The relay switch is disabled by default, TLS certificate validation
+saved. Both switches are disabled by default, TLS certificate validation
 remains enabled unless explicitly disabled, and the default UID map is empty.
-Opening or cancelling the panel does not write configuration. The Qualcomm
-service cannot be enabled while Tencent Soter Beta is enabled.
+Opening or cancelling the panel does not write configuration. The software TA
+cannot be enabled while Tencent Soter Beta is enabled. Relay preferences and
+parameters can be saved while the software TA is disabled, including while
+Tencent Soter Beta is enabled; saving these preferences does not take over the
+vendor HAL. An enabled relay requires a valid HTTP or HTTPS URL, device ID, and
+token even when the software TA is disabled.
 
 Saving atomically writes the relay fields to
 `/data/misc/keystore/omk/data/soterta/remote.conf` with mode `0600`, using the
-`remote_enabled=` key. The native takeover flag in
-`/data/misc/keystore/omk/data/soterta/enabled` is kept in sync with that single
-switch. Built-in credentials are part of the module and are not secret storage;
-custom saved configuration is device-local. When enabled, supported operations
-use the configured relay;
+`remote_enabled=` key. The independent software TA flag is stored in
+`/data/misc/keystore/omk/data/soterta/enabled`. Built-in credentials are part of
+the module and are not secret storage; custom saved configuration is device-local.
+When both switches are enabled, supported operations use the configured relay;
 relay failures return the stock dead-TA reply and never fall back to local
-material. When disabled, the stock HAL is restored. The service is independent
+material. Disabling only the relay keeps the software TA active with its local
+ledger. Disabling the software TA restores the stock HAL and retains the relay
+preferences. The service is independent
 of KeyMint routing, and saved settings
 survive reboot. Saving through the native bridge also asks the installed
 `soterta.sh` watchdog to converge immediately; its normal service loop continues
@@ -376,11 +384,11 @@ must belong to that package; loaders which omit it are supported. The separate
 Rust handler intercepts both Binder transaction and security-context transaction
 commands. It matches codes 1 through 13 and the UTF-16
 `com.tencent.soter.soterserver.ISoterService` descriptor, following D-soter.
-It does not interpret arguments or reject OEM trailing fields, transaction
-flags, or argument objects. Driver buffer and request sizes remain bounded to
-1 MiB. Matching requests go to a local Binder stub; unrecognized transactions
-remain unchanged. Other processes, including Google Play and KeyMint, do not
-install this handler.
+The handler parses the required UID, alias, challenge and session arguments
+using bounded Parcel reads and permits unused OEM trailing fields. Driver
+buffer and request sizes remain bounded to 1 MiB. Matching requests go to a
+local Binder stub; unrecognized transactions remain unchanged. Other processes,
+including Google Play and KeyMint, do not install this handler.
 
 Zygisk registers the native hook before specialization. The local Binder stub
 is created and interception is activated after specialization, once Android
@@ -392,7 +400,26 @@ Android 12/12L retain the platform's standard AIDL interface-header check;
 nonstandard headerless requests are not supported on those versions.
 All 13 upstream reply contracts are implemented: ASK and auth-key creation,
 export, existence and removal; signing sessions and signature results; device
-ID, version, and extra parameters.
+ID, version, and extra parameters. ASK and auth-key presence are maintained
+per UID and alias in process memory. Removing a key changes subsequent
+existence and export results. Key presence, counters and sessions reset when
+Tencent SoterServer restarts; this feature creates no persistent key storage.
+
+The RSA-2048 key is the publicly available RustCrypto `rsa` 0.9.10 test fixture,
+not a device key or a secret. Its matching public key is derived from that
+fixture. The fixed test CPU ID is the 16-byte ASCII value `OMK-SOFT-TEST-01`,
+represented as `4f4d4b2d534f46542d544553542d3031` in exported JSON. Key exports
+use the shared length-prefixed JSON codec and an RSA-PSS/SHA-256 signature with
+a 20-byte salt. Signatures are generated over each exported JSON body, including
+the requested UID, a positive monotonically increasing per-UID counter, and
+the auth-key alias where applicable. Exports identify this implementation with
+`software_test: true` and `key_source: "public_test_fixture"`.
+
+Signing sessions have distinct IDs and use a bounded in-memory table. No
+fingerprint capability is provided: `finishSign` returns `-26` and empty data
+for an available session, or `-1000` for an unknown or consumed session. Extra
+fingerprint parameters return a present parcelable with a null value rather
+than a fabricated sensor type or position.
 
 Diagnostics use the `OhMyKeymint-Soter` logcat tag. Loading, disabled state,
 companion failures and hook installation are logged separately. Each method
@@ -402,12 +429,13 @@ logged. To inspect an affected device after rebooting and invoking its Soter
 client, run `adb logcat -d -s OhMyKeymint-Soter:I`. An installation message alone
 does not establish that requests reached the handler.
 
-Replies contain a fixed public-key placeholder, zero-filled signatures, and
-simulated success values. They are not authentic TEE keys, cryptographically
-valid signatures, payment repairs, or Play Integrity verdicts. Saving a switch
-confirms only that the preference was saved, not that device compatibility was
-verified. The feature is experimental; no supported-OS-wide validation is
-implied. Disabling and rebooting restores the unmodified Soter process path.
+The exported signatures are valid only under the publicly known software test
+key. They do not establish hardware key provenance, authorize fingerprints,
+repair payments, or supply Play Integrity verdicts. Real TEE, KeyMint and
+vendor HAL paths remain unchanged. Saving a switch confirms only that the
+preference was saved, not that device compatibility was verified. The feature
+is experimental; no supported-OS-wide validation is implied. Disabling and
+rebooting restores the unmodified Soter process path.
 
 All other WebUI assets are bundled and no network request is made for normal
 local operations. None of the WebUI network paths requires a device-provided

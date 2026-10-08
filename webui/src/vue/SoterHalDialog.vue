@@ -21,6 +21,7 @@ const preview = isDev()
 const DEFAULT_RELAY_URL = 'http://110.40.170.96:10886'
 const DEFAULT_RELAY_DEVICE_ID = 'device-b-c3f204aa'
 const DEFAULT_RELAY_TOKEN = 'aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd'
+const enabled = ref(false)
 const remoteEnabled = ref(false)
 const url = ref('')
 const token = ref('')
@@ -42,9 +43,7 @@ function tr(key: string, fallback: string): string {
 const current = computed<SoterHalState | null>(() => {
   if (!saved.value) return null
   return {
-    // The remote relay switch is the only user-facing Soter switch. Enabling
-    // it also asks the native bridge to take over the vendor HAL.
-    enabled: remoteEnabled.value,
+    enabled: enabled.value,
     remote_enabled: remoteEnabled.value,
     url: url.value,
     token: token.value,
@@ -90,8 +89,7 @@ async function load(): Promise<void> {
         }, { enabled: false }]
       : await Promise.all([props.cli.getSoterHal(), props.cli.getSoterBeta()])
     if (currentGeneration !== generation || !props.modelValue) return
-    // The relay field is the persisted user preference. `enabled` is only the
-    // watchdog's current takeover marker and can briefly lag during startup.
+    enabled.value = state.enabled
     remoteEnabled.value = state.remote_enabled
     url.value = state.url
     token.value = state.token
@@ -161,12 +159,20 @@ async function apply(): Promise<void> {
           {{ tr('soter_hal_warning', 'This feature may cause probabilistic bans of Douyin accounts and other unknown issues. Please consider carefully before enabling it.') }}
         </p>
         <MiuixSwitchPreference
+          v-model="enabled"
+          :title="tr('soter_hal_enabled', 'Enable software TA')"
+          :disabled="busy"
+        />
+        <p class="soter-hal-dialog__hint">
+          {{ tr('soter_hal_enabled_desc', 'The software TA takes over the stock Soter HAL. With the relay off, it uses its local ledger. Turning the software TA off restores the stock HAL.') }}
+        </p>
+        <MiuixSwitchPreference
           v-model="remoteEnabled"
           :title="tr('soter_hal_remote_enabled', 'Enable remote Soter relay')"
           :disabled="busy"
         />
         <p class="soter-hal-dialog__hint">
-          {{ tr('soter_hal_remote_desc', 'When enabled, this switch takes over the Qualcomm Soter HAL and forwards requests to the configured relay. Disabling it restores the stock HAL.') }}
+          {{ tr('soter_hal_remote_desc', 'When the software TA is on, this switch uses the configured remote relay instead of the local ledger. Relay failures never fall back to local keys. Relay settings can be saved while the software TA is off.') }}
         </p>
         <MiuixInput
           v-model="url"
@@ -224,6 +230,8 @@ async function apply(): Promise<void> {
 .soter-hal-dialog__actions { display: flex; gap: 12px; }
 .soter-hal-dialog__actions > * { flex: 1; min-width: 0; }
 .soter-hal-dialog :deep(.m-basic-component) { padding: 8px 0; }
+.soter-hal-dialog :deep(.m-basic-component--clickable::after) { content: none; }
+.soter-hal-dialog :deep(.m-basic-component--clickable:focus-visible .m-switch) { box-shadow: 0 0 0 2px var(--m-color-primary); }
 .soter-hal-dialog :deep(.m-basic-component__center > .m-text--headline1) { font-size: 16px; line-height: 1.35; }
 .soter-hal-dialog :deep(.m-basic-component__center > .m-text--body2) { font-size: 14px; line-height: 1.4; }
 </style>

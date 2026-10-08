@@ -27,8 +27,8 @@ use crate::root_path;
 pub const CONFIG_PATH: &str = root_path!("data/soterta/remote.conf");
 const CONFIG_DIR: &str = root_path!("data/soterta");
 /// Persistent switch for taking over the vendor Soter service. It is kept as
-/// a separate on-disk marker for watchdog coordination, while the WebUI keeps
-/// it synchronized with `remote_enabled` through the single user-facing switch.
+/// a separate on-disk marker for watchdog coordination, independently of
+/// remote forwarding configured in `remote.conf`.
 pub const SOFTWARE_FLAG_PATH: &str = root_path!("data/soterta/enabled");
 const MAX_URL_BYTES: usize = 2048;
 const MAX_TOKEN_BYTES: usize = 1024;
@@ -168,7 +168,11 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        let mut config = match fs::read_to_string(CONFIG_PATH) {
+        Self::load_from_paths(Path::new(CONFIG_PATH), Path::new(SOFTWARE_FLAG_PATH))
+    }
+
+    fn load_from_paths(config_path: &Path, software_flag_path: &Path) -> Result<Self> {
+        let mut config = match fs::read_to_string(config_path) {
             Ok(raw) => {
                 let legacy = !raw.lines().any(|line| {
                     line.split_once('=')
@@ -176,9 +180,8 @@ impl Config {
                 });
                 let mut config = Self::parse_file(&raw)?;
                 // Before the split, `enabled` controlled both the watchdog
-                // and remote forwarding.  Preserve that behavior once while
-                // upgrading a legacy file; a new file can explicitly keep
-                // the legacy takeover marker with remote forwarding enabled.
+                // and remote forwarding. Preserve that behavior for legacy
+                // files; new files keep forwarding independent of takeover.
                 if legacy && config.remote_enabled {
                     config.enabled = true;
                 }
@@ -187,11 +190,9 @@ impl Config {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(error) => Err(error).context("failed to read Soter HAL configuration")?,
         };
-        // The WebUI has one Soter switch: a takeover is effective only when
-        // remote forwarding is enabled as well. The legacy `enabled=true`
-        // spelling above remains accepted during migration.
-        config.enabled =
-            config.remote_enabled && (config.enabled || Path::new(SOFTWARE_FLAG_PATH).is_file());
+        // A local software TA can run without remote forwarding, and relay
+        // settings can be prepared while the stock HAL remains active.
+        config.enabled = config.enabled || software_flag_path.is_file();
         Ok(config)
     }
 }
@@ -278,10 +279,9 @@ pub fn state_json() -> Result<String> {
 }
 
 pub fn is_enabled() -> Result<bool> {
-    // Feature exclusivity follows the persisted relay switch, which is the
-    // single user-facing Soter setting. A stale takeover flag must not block
-    // Tencent Soter Beta after the relay has been disabled.
-    Ok(Config::load()?.remote_enabled)
+    // Exclusivity follows HAL takeover, including local software-TA mode.
+    // Prepared relay settings alone do not enable the Qualcomm service.
+    Ok(Config::load()?.enabled)
 }
 
 fn ensure_config_dir() -> Result<()> {
@@ -344,11 +344,7 @@ fn refresh_watchdog(config_enabled: bool) -> Result<()> {
 }
 
 pub fn save(config: Config) -> Result<()> {
-    let mut config = config.with_webui_defaults();
-    // Keep the native bridge aligned with the single WebUI switch. Direct
-    // callers that send only `remote_enabled` must enable or disable takeover
-    // together with the relay rather than leaving a stale flag behind.
-    config.enabled = config.remote_enabled;
+    let config = config.with_webui_defaults();
     config.validate()?;
     ensure_config_dir()?;
     let contents = file_contents(&config);
@@ -553,6 +549,74 @@ mod tests {
         .unwrap();
         assert!(split.remote_enabled);
         assert!(!split.enabled);
+    }
+
+    #[test]
+    fn independent_switches_round_trip_through_transport_and_split_storage() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config_path = directory.path().join("remote.conf");
+        let flag_path = directory.path().join("enabled");
+        for enabled in [false, true] {
+            for remote_enabled in [false, true] {
+                let config = Config {
+                    enabled,
+                    remote_enabled,
+                    url: "https://relay.example.test/base".into(),
+                    token: "custom-token".into(),
+                    device_id: "custom-device".into(),
+                    tls_insecure: true,
+                    uid_map: "10001=10002".into(),
+                };
+                let payload = BASE64_STANDARD.encode(serde_json::to_string(&config).unwrap());
+                let transported = Config::parse_base64(&payload).unwrap();
+                assert_eq!(transported, config);
+                fs::write(&config_path, file_contents(&transported)).unwrap();
+                if transported.enabled {
+                    fs::write(&flag_path, b"1\n").unwrap();
+                } else if flag_path.exists() {
+                    fs::remove_file(&flag_path).unwrap();
+                }
+                assert_eq!(
+                    Config::load_from_paths(&config_path, &flag_path).unwrap(),
+                    config
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn independent_takeover_flag_preserves_legacy_and_local_only_state() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let config_path = directory.path().join("remote.conf");
+        let flag_path = directory.path().join("enabled");
+        assert_eq!(
+            Config::load_from_paths(&config_path, &flag_path).unwrap(),
+            Config::default()
+        );
+        fs::write(&flag_path, b"1\n").unwrap();
+        let local = Config::load_from_paths(&config_path, &flag_path).unwrap();
+        assert!(local.enabled);
+        assert!(!local.remote_enabled);
+        fs::remove_file(&flag_path).unwrap();
+
+        fs::write(&config_path, "enabled=true\n").unwrap();
+        let legacy = Config::load_from_paths(&config_path, &flag_path).unwrap();
+        assert!(legacy.enabled);
+        assert!(legacy.remote_enabled);
+
+        fs::write(&config_path, "remote_enabled=true\n").unwrap();
+        let prepared = Config::load_from_paths(&config_path, &flag_path).unwrap();
+        assert!(!prepared.enabled);
+        assert!(prepared.remote_enabled);
+        assert_eq!(prepared.url, DEFAULT_RELAY_URL);
+        assert_eq!(prepared.device_id, DEFAULT_RELAY_DEVICE_ID);
+        assert!(prepared.token == DEFAULT_RELAY_TOKEN);
+
+        fs::write(&flag_path, b"1\n").unwrap();
+        fs::write(&config_path, "remote_enabled=false\n").unwrap();
+        let local = Config::load_from_paths(&config_path, &flag_path).unwrap();
+        assert!(local.enabled);
+        assert!(!local.remote_enabled);
     }
 
     #[test]

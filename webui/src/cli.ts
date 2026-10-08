@@ -573,9 +573,6 @@ export class Cli {
     // write so the mandatory read-back check compares effective values.
     const effectiveState: SoterHalState = {
       ...state,
-      // The WebUI exposes one Soter switch: remote relay enabled also means
-      // the software TA must take over the vendor HAL.
-      enabled: state.remote_enabled,
       url: state.url || DEFAULT_SOTER_RELAY_URL,
       token: state.token || DEFAULT_SOTER_RELAY_TOKEN,
       device_id: state.device_id || DEFAULT_SOTER_RELAY_DEVICE_ID,

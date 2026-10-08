@@ -1,7 +1,8 @@
 //! Optional D-Soter-compatible experiment, not hardware or payment-key recovery.
 //!
-//! Reply values follow ajfkdk/D-soter (Apache-2.0), commit
+//! Binder reply shapes follow ajfkdk/D-soter (Apache-2.0), commit
 //! 6148e02ea5977cb95b5a162a405fc915e39c01db, module/jni/dsoter.cpp.
+//! Public software fixtures sign exports, never biometric/payment challenges.
 
 use std::{
     ffi::{CStr, c_char, c_void},
@@ -9,7 +10,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     ptr,
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
     },
 };
@@ -80,7 +81,6 @@ type PlatformSize = unsafe extern "C" fn(*const c_void) -> usize;
 type WriteInt32 = unsafe extern "C" fn(*mut c_void, i32) -> i32;
 type WriteInt64 = unsafe extern "C" fn(*mut c_void, i64) -> i32;
 type WriteBytes = unsafe extern "C" fn(*mut c_void, *const i8, i32) -> i32;
-type WriteString = unsafe extern "C" fn(*mut c_void, *const c_char, i32) -> i32;
 
 // Exact Android 12/13 NDK parcel_internal.h layout, matching OMK's injector.
 // Android 14+ must provide the platform accessor instead of using this layout.
@@ -101,13 +101,13 @@ struct NativeApi {
     write_i32: WriteInt32,
     write_i64: WriteInt64,
     write_bytes: WriteBytes,
-    write_string: WriteString,
 }
 
 struct NativeStub {
     api: NativeApi,
     binder: usize,
     target: Target,
+    state: Mutex<wire::SoftwareState>,
 }
 
 static NATIVE: OnceLock<Result<NativeStub, String>> = OnceLock::new();
@@ -199,7 +199,9 @@ pub(crate) fn activate() {
     match NATIVE.get_or_init(|| load_native(*ndk, *binder)) {
         Ok(_) => {
             ACTIVE.store(true, Ordering::Release);
-            log("Soter Beta hook active after specialization; responses are simulated");
+            log(
+                "Soter Beta software test mode active; public fixture keys, no biometric authentication",
+            );
         }
         Err(error) => log(&format!("Soter Beta native handler unavailable: {error}")),
     }
@@ -277,7 +279,8 @@ fn candidate(transaction: &Transaction) -> bool {
     (1..=13).contains(&transaction.code)
         && transaction.target != 0
         // The kernel owns and validates the payload and its object offsets.
-        // D-soter ignores argument objects and accepts all transaction flags.
+        // Required arguments are primitive values; OEM trailing objects and
+        // transaction flags remain owned and validated by the driver.
         && transaction.data_size <= MAX_REQUEST_BYTES as u64
         && valid_pointer_range(transaction.buffer, transaction.data_size)
 }
@@ -381,7 +384,6 @@ fn load_native(ndk: usize, binder: usize) -> Result<NativeStub, String> {
         write_i32: symbol(ndk, c"AParcel_writeInt32")?,
         write_i64: symbol(ndk, c"AParcel_writeInt64")?,
         write_bytes: symbol(ndk, c"AParcel_writeByteArray")?,
-        write_string: symbol(ndk, c"AParcel_writeString")?,
     };
     let define: ClassDefine = symbol(ndk, c"AIBinder_Class_define")?;
     let new: BinderNew = symbol(ndk, c"AIBinder_new")?;
@@ -425,6 +427,7 @@ fn load_native(ndk: usize, binder: usize) -> Result<NativeStub, String> {
             api,
             binder: stub as usize,
             target,
+            state: Mutex::new(wire::SoftwareState::default()),
         }),
         Err(error) => {
             unsafe { dec_strong(stub) };
@@ -523,18 +526,23 @@ unsafe extern "C" fn on_transact(
         if !reply.is_empty() {
             return BAD_VALUE;
         }
-        wire::write_reply(
-            code,
-            &mut NativeWriter {
-                api: &native.api,
-                output,
-            },
-        )
-        .map_or_else(|status| status, |()| 0)
+        native
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .write_reply(
+                code,
+                bytes,
+                &mut NativeWriter {
+                    api: &native.api,
+                    output,
+                },
+            )
+            .map_or_else(|status| status, |()| 0)
     }))
     .unwrap_or(-libc::EFAULT);
     if result == 0 {
-        log_code_once(&REPLIED_CODES, code, "Soter simulated reply delivered");
+        log_code_once(&REPLIED_CODES, code, "Soter software test reply delivered");
     } else {
         log_code_once(
             &FAILED_CODES,
@@ -560,11 +568,6 @@ impl wire::Writer for NativeWriter<'_> {
     fn bytes(&mut self, value: &[u8]) -> Result<(), i32> {
         status(unsafe {
             (self.api.write_bytes)(self.output, value.as_ptr().cast(), value.len() as i32)
-        })
-    }
-    fn string(&mut self, value: &str) -> Result<(), i32> {
-        status(unsafe {
-            (self.api.write_string)(self.output, value.as_ptr().cast(), value.len() as i32)
         })
     }
 }

@@ -767,7 +767,7 @@ fn handle_webui_soter_hal_command(
                 Ok(config) => config,
                 Err(error) => return Some(Err(format!("{error:#}"))),
             };
-            if config.remote_enabled {
+            if config.enabled {
                 if let Err(error) = ensure_soter_features_are_exclusive(
                     true,
                     soter_beta::is_enabled(),

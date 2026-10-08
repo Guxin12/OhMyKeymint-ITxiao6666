@@ -161,7 +161,7 @@
     <string name="settings_liquid_glass_desc">為介面增加半透明玻璃層次</string>
     <string name="tools_soter_beta">騰訊 Soter 相容（Beta）</string>
     <string name="tools_soter_beta_desc">騰訊 SoterServer 的實驗性相容功能，需要 Zygisk Next。</string>
-    <string name="soter_beta_warning">僅限 Beta 模擬：傳回固定公鑰與全零簽章，並非真正的 TEE 認證，也無法修復支付或加密簽章。僅作用於騰訊 SoterServer，不影響 KeyMint。</string>
+    <string name="soter_beta_warning">僅限 Beta 軟體測試：使用公開的測試金鑰和固定測試 CPU ID，動態簽署金鑰匯出資料。騰訊 SoterServer 重新啟動後金鑰狀態會重設。不提供指紋、TEE 或支付認證，不影響 KeyMint。</string>
     <string name="soter_beta_enabled">啟用 Soter 相容</string>
     <string name="soter_beta_enabled_desc">預設關閉。點選套用後才會儲存變更。</string>
     <string name="soter_beta_reboot">請自行安裝並啟用 Zygisk Next。開啟或關閉後均需重新啟動裝置；相容效果尚未驗證。</string>

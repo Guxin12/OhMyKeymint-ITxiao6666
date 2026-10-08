@@ -99,7 +99,7 @@ async function apply(): Promise<void> {
   >
     <div class="soter-dialog" :aria-busy="busy || status === 'loading'">
       <p class="soter-dialog__warning">
-        {{ tr('soter_beta_warning', 'Beta simulation only: returns a fixed public key and zero-filled signatures. This is not real TEE attestation and does not repair payments or cryptographic signatures. Applies only to Tencent SoterServer, not KeyMint.') }}
+        {{ tr('soter_beta_warning', 'Beta software test only: uses a publicly known test key and fixed test CPU ID for dynamically signed key exports. Key state resets when Tencent SoterServer restarts. It provides no fingerprint, TEE or payment authentication and does not change KeyMint.') }}
       </p>
       <p>{{ tr('soter_beta_reboot', 'Install and enable Zygisk Next separately. Restart the device after enabling or disabling. Compatibility is not verified.') }}</p>
       <p v-if="soterHalEnabled" class="soter-dialog__warning">

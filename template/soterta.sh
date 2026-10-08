@@ -203,20 +203,6 @@ hal_state() {
   [ -n "$value" ] && echo "$value" || echo unknown
 }
 
-# The WebUI has one switch: remote_enabled controls both relay forwarding and
-# software-TA takeover. Keep accepting the old `enabled=true` spelling while
-# an installation is being migrated.
-remote_requested() {
-  if grep -Eq '^[[:space:]]*remote_enabled[[:space:]]*=[[:space:]]*(true|1|yes|on)[[:space:]]*$' "$TA_DIR/remote.conf" 2>/dev/null; then
-    echo 1
-  elif ! grep -Eq '^[[:space:]]*remote_enabled[[:space:]]*=' "$TA_DIR/remote.conf" 2>/dev/null \
-      && grep -Eq '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*(true|1|yes|on)[[:space:]]*$' "$TA_DIR/remote.conf" 2>/dev/null; then
-    echo 1
-  else
-    echo 0
-  fi
-}
-
 # Older OMK releases stored the takeover and relay switches together as
 # `enabled=true` in remote.conf. Migrate that state once so an upgrade keeps
 # the software TA takeover active before the first WebUI save.
@@ -238,7 +224,7 @@ migrate_legacy_flag() {
 # a daemon that never noticed, and calling that "us" would leave the device with
 # a dead Soter while every status check says it is fine.
 service_owner() {
-  if ! service check "$SERVICE" 2>/dev/null | grep -q found; then
+  if ! service check "$SERVICE" 2>/dev/null | grep -q ': found$'; then
     echo none
     return
   fi
@@ -355,8 +341,8 @@ restore_hal() {
 # Read-only snapshot; also safe to run while another converge holds the lock.
 snapshot_state() {
   g_enabled=0
-  # The single WebUI switch owns both the takeover flag and remote forwarding.
-  [ -f "$FLAG" ] && [ "$(remote_requested)" = 1 ] && g_enabled=1
+  # Software-TA takeover is independent of the relay configuration.
+  [ -f "$FLAG" ] && g_enabled=1
   g_pid=$(daemon_pid) || g_pid=
   g_running=0
   [ -n "$g_pid" ] && g_running=1
