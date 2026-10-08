@@ -68,6 +68,7 @@ use crate::top::qwq2333::ohmykeymint::{
 use crate::watchdog as wd;
 use anyhow::{Context, Result};
 use log::error;
+use std::cell::RefCell;
 use std::convert::TryInto;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -119,7 +120,65 @@ impl Deref for OmkSecurityLevelWrapper {
 // Blob of 32 zeroes used as empty masking key.
 static ZERO_BLOB_32: &[u8] = &[0; 32];
 
+/// Discard a newly created KeyMint blob when publication fails.
+struct KeyBlobRollback<F: Fn(&[u8]) -> Result<(), Error>> {
+    blob: RefCell<Option<Vec<u8>>>,
+    delete: F,
+}
+
+impl<F: Fn(&[u8]) -> Result<(), Error>> KeyBlobRollback<F> {
+    fn new(delete: F) -> Self {
+        Self {
+            blob: RefCell::new(None),
+            delete,
+        }
+    }
+
+    fn record(&self, blob: &[u8]) {
+        *self.blob.borrow_mut() = Some(blob.to_vec());
+    }
+
+    fn finish<T>(mut self, result: Result<T>) -> Result<T> {
+        if result.is_ok() {
+            self.blob.get_mut().take();
+        }
+        result
+    }
+}
+
+impl<F: Fn(&[u8]) -> Result<(), Error>> Drop for KeyBlobRollback<F> {
+    fn drop(&mut self) {
+        if let Some(blob) = self.blob.get_mut().take() {
+            if (self.delete)(&blob).is_err() {
+                log::warn!("Failed to delete unpublished KeyMint blob after storage failure.");
+            }
+        }
+    }
+}
+
 impl KeystoreSecurityLevel {
+    fn keymint_for_caller(&self, ctx: Option<&CallerInfo>) -> Result<KeyMintWrapper> {
+        let snapshot = crate::config::config().read().unwrap().clone();
+        if snapshot.app_patch_levels.is_empty() {
+            return Ok(self.keymint.clone());
+        }
+        let uid =
+            u32::try_from(caller_uid(ctx).0).map_err(|_| Error::Km(ErrorCode::INVALID_ARGUMENT))?;
+        if uid % kmr_common::consts::AID_USER_OFFSET < kmr_common::consts::AID_APP_START {
+            return Ok(self.keymint.clone());
+        }
+        let packages = if kmr_common::consts::is_isolated_uid(uid) {
+            let caller = ctx.ok_or_else(Error::sys)?;
+            let pid = u32::try_from(caller.pid).map_err(|_| Error::sys())?;
+            crate::plat::resetprop::runtime_isolated_caller_packages(uid, pid)?
+        } else {
+            plat_utils::package_names_for_uid(uid)?
+        };
+        Ok(self
+            .keymint
+            .with_patchlevels(snapshot.app_patch_profile(uid, &packages)?))
+    }
+
     fn new(security_level: SecurityLevel, id_rotation_state: IdRotationState) -> Result<Self> {
         let dev =
             get_keymint_wrapper(security_level).context(ks_err!("KeystoreSecurityLevel::new."))?;
@@ -186,116 +245,124 @@ impl KeystoreSecurityLevel {
         user: AndroidUserId,
         flags: Option<i32>,
         keybox_attestation_allowed: bool,
+        usage_key_id: Option<i64>,
     ) -> Result<KeyMetadata> {
-        let KeyCreationResult {
-            keyBlob: key_blob,
-            keyCharacteristics: key_characteristics,
-            certificateChain: mut certificate_chain,
-        } = creation_result;
+        let rollback = KeyBlobRollback::new(|blob| self.keymint.delete_Key(blob));
+        rollback.record(&creation_result.keyBlob);
+        let result = (|| {
+            let KeyCreationResult {
+                keyBlob: key_blob,
+                keyCharacteristics: key_characteristics,
+                certificateChain: mut certificate_chain,
+            } = creation_result;
 
-        // Unify the possible contents of the certificate chain.  The first entry in the `Vec` is
-        // always the leaf certificate (if present), but the rest of the chain may be present as
-        // either:
-        //  - `certificate_chain[1..n]`: each entry holds a single certificate, as returned by
-        //    KeyMint, or
-        //  - `certificate_chain[1]`: a single `Certificate` that actually (and confusingly) holds
-        //    the DER-encoded certs of the chain concatenated together.
-        let has_attestation_chain = certificate_chain.len() > 1;
-        let mut cert_info: CertificateInfo = CertificateInfo::new(
-            // Leaf is always a single cert in the first entry, if present.
-            match certificate_chain.len() {
-                0 => None,
-                _ => Some(certificate_chain.remove(0).encodedCertificate),
-            },
-            // Remainder may be either `[1..n]` individual certs, or just `[1]` holding a
-            // concatenated chain. Convert the former to the latter.
-            match certificate_chain.len() {
-                0 => None,
-                _ => Some(
-                    certificate_chain
-                        .iter()
-                        .flat_map(|c| c.encodedCertificate.iter())
-                        .copied()
-                        .collect(),
-                ),
-            },
-        );
+            // Unify the possible contents of the certificate chain.  The first entry in the `Vec` is
+            // always the leaf certificate (if present), but the rest of the chain may be present as
+            // either:
+            //  - `certificate_chain[1..n]`: each entry holds a single certificate, as returned by
+            //    KeyMint, or
+            //  - `certificate_chain[1]`: a single `Certificate` that actually (and confusingly) holds
+            //    the DER-encoded certs of the chain concatenated together.
+            let has_attestation_chain = certificate_chain.len() > 1;
+            let mut cert_info: CertificateInfo = CertificateInfo::new(
+                // Leaf is always a single cert in the first entry, if present.
+                match certificate_chain.len() {
+                    0 => None,
+                    _ => Some(certificate_chain.remove(0).encodedCertificate),
+                },
+                // Remainder may be either `[1..n]` individual certs, or just `[1]` holding a
+                // concatenated chain. Convert the former to the latter.
+                match certificate_chain.len() {
+                    0 => None,
+                    _ => Some(
+                        certificate_chain
+                            .iter()
+                            .flat_map(|c| c.encodedCertificate.iter())
+                            .copied()
+                            .collect(),
+                    ),
+                },
+            );
 
-        let mut key_parameters = key_characteristics_to_internal(key_characteristics);
-        let keybox_attested = is_keybox_bound_attestation_key(
-            keybox_attestation_allowed,
-            has_attestation_chain,
-            &key_parameters,
-        );
+            let mut key_parameters = key_characteristics_to_internal(key_characteristics);
+            let keybox_attested = is_keybox_bound_attestation_key(
+                keybox_attestation_allowed,
+                has_attestation_chain,
+                &key_parameters,
+            );
 
-        key_parameters.push(KsKeyParam::new(
-            KsKeyParamValue::UserID(user.0),
-            SecurityLevel::SOFTWARE,
-        ));
+            key_parameters.push(KsKeyParam::new(
+                KsKeyParamValue::UserID(user.0),
+                SecurityLevel::SOFTWARE,
+            ));
 
-        let creation_date = DateTime::now().context(ks_err!("Trying to make creation time."))?;
+            let creation_date =
+                DateTime::now().context(ks_err!("Trying to make creation time."))?;
 
-        let key = match key.domain {
-            Domain::BLOB => KeyDescriptor {
-                domain: Domain::BLOB,
-                blob: Some(key_blob.to_vec()),
-                ..Default::default()
-            },
-            _ => DB
-                .with::<_, Result<KeyDescriptor>>(|db| {
-                    let mut db = db.borrow_mut();
+            let key = match key.domain {
+                Domain::BLOB => KeyDescriptor {
+                    domain: Domain::BLOB,
+                    blob: Some(key_blob.to_vec()),
+                    ..Default::default()
+                },
+                _ => DB
+                    .with::<_, Result<KeyDescriptor>>(|db| {
+                        let mut db = db.borrow_mut();
 
-                    let (key_blob, mut blob_metadata) = SUPER_KEY
-                        .read()
-                        .unwrap()
-                        .handle_super_encryption_on_key_init(
-                            &mut db,
-                            &(key.domain),
-                            &key_parameters,
-                            flags,
-                            user,
-                            &key_blob,
-                        )
-                        .context(ks_err!("Failed to handle super encryption."))?;
+                        let (key_blob, mut blob_metadata) = SUPER_KEY
+                            .read()
+                            .unwrap()
+                            .handle_super_encryption_on_key_init(
+                                &mut db,
+                                &(key.domain),
+                                &key_parameters,
+                                flags,
+                                user,
+                                &key_blob,
+                            )
+                            .context(ks_err!("Failed to handle super encryption."))?;
 
-                    let km_uuid = Uuid::from(self.security_level);
-                    let mut key_metadata = KeyMetaData::new();
-                    key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
-                    if keybox_attested && km_uuid.is_keybox_bound() {
-                        key_metadata.add(KeyMetaEntry::KeyboxAttestationUuidPrefix(
-                            km_uuid.get_digest().to_vec(),
-                        ));
-                    }
-                    blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
+                        let km_uuid = Uuid::from(self.security_level);
+                        let mut key_metadata = KeyMetaData::new();
+                        key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
+                        if keybox_attested && km_uuid.is_keybox_bound() {
+                            key_metadata.add(KeyMetaEntry::KeyboxAttestationUuidPrefix(
+                                km_uuid.get_digest().to_vec(),
+                            ));
+                        }
+                        blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
 
-                    let key_id = db
-                        .store_new_key(
-                            &key,
-                            KeyType::Client,
-                            &key_parameters,
-                            &BlobInfo::new(&key_blob, &blob_metadata),
-                            &cert_info,
-                            &key_metadata,
-                            &km_uuid,
-                        )
-                        .context(ks_err!())?;
-                    Ok(KeyDescriptor {
-                        domain: Domain::KEY_ID,
-                        nspace: key_id.id(),
-                        ..Default::default()
+                        let key_id = db
+                            .store_new_key(
+                                &key,
+                                KeyType::Client,
+                                &key_parameters,
+                                &BlobInfo::new(&key_blob, &blob_metadata),
+                                &cert_info,
+                                &key_metadata,
+                                &km_uuid,
+                                usage_key_id,
+                            )
+                            .context(ks_err!())?;
+                        Ok(KeyDescriptor {
+                            domain: Domain::KEY_ID,
+                            nspace: key_id.id(),
+                            ..Default::default()
+                        })
                     })
-                })
-                .context(ks_err!())?,
-        };
+                    .context(ks_err!())?,
+            };
 
-        Ok(KeyMetadata {
-            key,
-            keySecurityLevel: self.security_level,
-            certificate: cert_info.take_cert(),
-            certificateChain: cert_info.take_cert_chain(),
-            authorizations: key_parameters_to_authorizations(key_parameters),
-            modificationTimeMs: creation_date.to_millis_epoch(),
-        })
+            Ok(KeyMetadata {
+                key,
+                keySecurityLevel: self.security_level,
+                certificate: cert_info.take_cert(),
+                certificateChain: cert_info.take_cert_chain(),
+                authorizations: key_parameters_to_authorizations(key_parameters),
+                modificationTimeMs: creation_date.to_millis_epoch(),
+            })
+        })();
+        rollback.finish(result)
     }
 
     fn create_operation(
@@ -409,6 +476,8 @@ impl KeystoreSecurityLevel {
             )
             .context(ks_err!())?;
 
+        let keymint = self.keymint_for_caller(ctx)?;
+
         let km_blob = SUPER_KEY
             .read()
             .unwrap()
@@ -417,7 +486,8 @@ impl KeystoreSecurityLevel {
 
         let (begin_result, upgraded_blob) = self
             .upgrade_keyblob_if_required_with(
-                key_id_guard,
+                &keymint,
+                key_id_guard.as_ref(),
                 &km_blob,
                 blob_metadata.km_uuid().copied(),
                 operation_parameters,
@@ -426,7 +496,7 @@ impl KeystoreSecurityLevel {
                         let _wp = self.watch(
                             "KeystoreSecurityLevel::create_operation: calling IKeyMintDevice::begin",
                         );
-                        self.keymint.begin(
+                        keymint.begin(
                             purpose,
                             blob,
                             operation_parameters,
@@ -454,6 +524,7 @@ impl KeystoreSecurityLevel {
                 },
             )
             .context(ks_err!("Failed to begin operation."))?;
+        drop(key_id_guard);
 
         let operation_challenge =
             auth_info.finalize_create_authorization(Challenge(begin_result.challenge));
@@ -703,6 +774,7 @@ impl KeystoreSecurityLevel {
     // updates have KeyMint instances that are guaranteed to support this flexible ordering.
     fn generate_key_and_retry_on_att_id_mismatch(
         &self,
+        keymint: &KeyMintWrapper,
         params: &[KeyParameter],
         attest_key: Option<&AttestationKey>,
     ) -> Result<KeyCreationResult, Error> {
@@ -711,7 +783,7 @@ impl KeystoreSecurityLevel {
                 "KeystoreSecurityLevel::generate_key: calling IKeyMintDevice::generateKey",
                 5000,
             );
-            self.keymint.generateKey(params, attest_key)
+            keymint.generateKey(params, attest_key)
         });
 
         match &result {
@@ -758,7 +830,7 @@ impl KeystoreSecurityLevel {
                 ),
                 5000,
             );
-            self.keymint.generateKey(&swapped_params, attest_key)
+            keymint.generateKey(&swapped_params, attest_key)
         })
     }
 
@@ -811,38 +883,50 @@ impl KeystoreSecurityLevel {
             .context(ks_err!("Trying to get aaid."))?;
 
         let keybox_attestation_allowed = attestation_key_info.is_none();
+        let keymint = self.keymint_for_caller(ctx)?;
         let creation_result = match attestation_key_info {
             Some(AttestationKeyInfo::UserGenerated {
                 key_id_guard,
                 blob,
                 blob_metadata,
                 issuer_subject,
-            }) => self
-                .upgrade_keyblob_if_required_with(
-                    Some(key_id_guard),
-                    &KeyBlob::Ref(&blob),
-                    blob_metadata.km_uuid().copied(),
-                    &params,
-                    |blob| {
-                        let attest_key = Some(AttestationKey {
-                            keyBlob: blob.to_vec(),
-                            attestKeyParams: vec![],
-                            issuerSubjectName: issuer_subject.clone(),
-                        });
-                        self.generate_key_and_retry_on_att_id_mismatch(&params, attest_key.as_ref())
-                    },
-                )
-                .context(ks_err!(
-                    "While generating with a user-generated \
-                      attestation key, params: {:?}.",
-                    log_security_safe_params(&params)
-                ))
-                .map(|(result, _)| result),
+            }) => {
+                let rollback = KeyBlobRollback::new(|blob| keymint.delete_Key(blob));
+                let result = self
+                    .upgrade_keyblob_if_required_with(
+                        &keymint,
+                        Some(&key_id_guard),
+                        &KeyBlob::Ref(&blob),
+                        blob_metadata.km_uuid().copied(),
+                        &params,
+                        |blob| {
+                            let attest_key = Some(AttestationKey {
+                                keyBlob: blob.to_vec(),
+                                attestKeyParams: vec![],
+                                issuerSubjectName: issuer_subject.clone(),
+                            });
+                            let result = self.generate_key_and_retry_on_att_id_mismatch(
+                                &keymint,
+                                &params,
+                                attest_key.as_ref(),
+                            )?;
+                            rollback.record(&result.keyBlob);
+                            Ok(result)
+                        },
+                    )
+                    .context(ks_err!(
+                        "While generating with a user-generated \
+                      attestation key, parameter tags: {:?}.",
+                        log_security_safe_params(&params)
+                    ))
+                    .map(|(result, _)| result);
+                rollback.finish(result)
+            }
             None => self
-                .generate_key_and_retry_on_att_id_mismatch(&params, None)
+                .generate_key_and_retry_on_att_id_mismatch(&keymint, &params, None)
                 .context(ks_err!(
                     "While generating without a provided \
-                 attestation key and params: {:?}.",
+                 attestation key and parameter tags: {:?}.",
                     log_security_safe_params(&params)
                 )),
         }
@@ -855,6 +939,7 @@ impl KeystoreSecurityLevel {
             user,
             Some(flags),
             keybox_attestation_allowed,
+            None,
         )
         .context(ks_err!())
     }
@@ -910,7 +995,7 @@ impl KeystoreSecurityLevel {
             })
             .context(ks_err!())?;
 
-        let km_dev = &self.keymint;
+        let km_dev = self.keymint_for_caller(ctx)?;
         let creation_result = map_km_error({
             let _wp =
                 self.watch("KeystoreSecurityLevel::import_key: calling IKeyMintDevice::importKey.");
@@ -919,7 +1004,7 @@ impl KeystoreSecurityLevel {
         .context(ks_err!("Trying to call importKey"))?;
 
         let user = caller_uid.owning_user();
-        self.store_new_key(key, creation_result, user, Some(flags), true)
+        self.store_new_key(key, creation_result, user, Some(flags), true, None)
             .context(ks_err!())
     }
 
@@ -947,8 +1032,8 @@ impl KeystoreSecurityLevel {
             } => blob,
             _ => {
                 return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT)).context(ks_err!(
-                    "Alias and blob must be specified and domain must be APP or SELINUX. {:?}",
-                    key
+                    "Alias and blob must be specified and domain must be APP or SELINUX. domain={:?} alias_present={} blob_present={}",
+                    key.domain, key.alias.is_some(), key.blob.is_some()
                 ));
             }
         };
@@ -1001,6 +1086,10 @@ impl KeystoreSecurityLevel {
             .context(ks_err!(
                 "No km_blob after successfully loading key. This should never happen."
             ))?;
+        let wrapping_key_params = wrapping_key_entry.into_key_parameters();
+        let mut usage_reservation = ENFORCEMENTS
+            .reserve_key_usage(wrapping_key_id_guard.id(), &wrapping_key_params)
+            .context(ks_err!("Failed to reserve wrapping key use."))?;
 
         let wrapping_key_blob = SUPER_KEY
             .read()
@@ -1034,10 +1123,13 @@ impl KeystoreSecurityLevel {
             .unwrap_or(-1);
 
         let masking_key = masking_key.unwrap_or(ZERO_BLOB_32);
+        let keymint = self.keymint_for_caller(ctx)?;
 
-        let (creation_result, _) = self
+        let rollback = KeyBlobRollback::new(|blob| keymint.delete_Key(blob));
+        let result = self
             .upgrade_keyblob_if_required_with(
-                Some(wrapping_key_id_guard),
+                &keymint,
+                Some(&wrapping_key_id_guard),
                 &wrapping_key_blob,
                 wrapping_blob_metadata.km_uuid().copied(),
                 &[],
@@ -1045,7 +1137,7 @@ impl KeystoreSecurityLevel {
                     let _wp = self.watch(
                         "KeystoreSecurityLevel::import_wrapped_key: calling IKeyMintDevice::importWrappedKey.",
                     );
-                    let creation_result = map_km_error(self.keymint.importWrappedKey(
+                    let creation_result = map_km_error(keymint.importWrappedKey(
                         wrapped_data,
                         wrapping_blob,
                         masking_key,
@@ -1053,17 +1145,24 @@ impl KeystoreSecurityLevel {
                         pw_sid,
                         fp_sid,
                     ))?;
+                    rollback.record(&creation_result.keyBlob);
                     Ok(creation_result)
                 },
             )
-            .context(ks_err!())?;
+            .context(ks_err!());
+        let (creation_result, _) = rollback.finish(result)?;
 
-        self.store_new_key(key, creation_result, user, None, true)
-            .context(ks_err!("Trying to store the new key for {user:?}"))
+        match usage_reservation.as_mut() {
+            Some(reservation) => reservation.commit(|usage_key_id| {
+                self.store_new_key(key, creation_result, user, None, true, Some(usage_key_id))
+            }),
+            None => self.store_new_key(key, creation_result, user, None, true, None),
+        }
+        .context(ks_err!("Trying to store the new key for {user:?}"))
     }
 
     fn store_upgraded_keyblob(
-        key_id_guard: KeyIdGuard,
+        key_id_guard: &KeyIdGuard,
         km_uuid: Option<Uuid>,
         key_blob: &KeyBlob,
         upgraded_blob: &[u8],
@@ -1080,7 +1179,7 @@ impl KeystoreSecurityLevel {
         DB.with(|db| {
             let mut db = db.borrow_mut();
             db.set_blob(
-                &key_id_guard,
+                key_id_guard,
                 SubComponentType::KEY_BLOB,
                 Some(&upgraded_blob_to_be_stored),
                 Some(&new_blob_metadata),
@@ -1091,7 +1190,8 @@ impl KeystoreSecurityLevel {
 
     fn upgrade_keyblob_if_required_with<T, F>(
         &self,
-        mut key_id_guard: Option<KeyIdGuard>,
+        keymint: &KeyMintWrapper,
+        key_id_guard: Option<&KeyIdGuard>,
         key_blob: &KeyBlob,
         km_uuid: Option<Uuid>,
         params: &[KeyParameter],
@@ -1101,15 +1201,13 @@ impl KeystoreSecurityLevel {
         F: Fn(&[u8]) -> Result<T, Error>,
     {
         let (v, upgraded_blob) = upgrade_keyblob_if_required_with(
-            &self.keymint,
+            keymint,
             self.hw_info.versionNumber,
             key_blob,
             params,
             f,
             |upgraded_blob| {
-                if key_id_guard.is_some() {
-                    // Unwrap cannot panic, because the is_some was true.
-                    let kid = key_id_guard.take().unwrap();
+                if let Some(kid) = key_id_guard {
                     Self::store_upgraded_keyblob(kid, km_uuid, key_blob, upgraded_blob)
                         .context(ks_err!("store_upgraded_keyblob failed"))
                 } else {
@@ -1123,9 +1221,10 @@ impl KeystoreSecurityLevel {
         ))?;
 
         // If no upgrade was needed, use the opportunity to reencrypt the blob if required
-        // and if the a key_id_guard is held. Note: key_id_guard can only be Some if no
-        // upgrade was performed above and if one was given in the first place.
-        if key_blob.force_reencrypt() {
+        // and if a key_id_guard is held. Do not overwrite an upgraded blob with
+        // the original one. Borrowing the guard keeps the wrapping key locked
+        // through destination publication.
+        if upgraded_blob.is_none() && key_blob.force_reencrypt() {
             if let Some(kid) = key_id_guard {
                 Self::store_upgraded_keyblob(kid, km_uuid, key_blob, key_blob)
                     .context(ks_err!("store_upgraded_keyblob failed in forced reencrypt"))?;
@@ -1612,6 +1711,55 @@ mod tests {
             Ok(_) => panic!("expected service-specific error"),
             Err(error) => into_logged_binder(error).service_specific_error(),
         }
+    }
+
+    #[test]
+    fn key_blob_rollback_preserves_publication_error_even_if_delete_fails() {
+        for delete_fails in [false, true] {
+            let deleted = RefCell::new(Vec::new());
+            let rollback = KeyBlobRollback::new(|blob| {
+                deleted.borrow_mut().push(blob.to_vec());
+                if delete_fails {
+                    Err(Error::Km(ErrorCode::INVALID_KEY_BLOB))
+                } else {
+                    Ok(())
+                }
+            });
+            // A creation callback succeeded, but later super-encryption or
+            // publication failed. The cleanup error must not replace LOCKED.
+            let create_and_publish = || -> Result<()> {
+                rollback.record(&[1, 2, 3]);
+                Err(Error::Rc(ResponseCode::LOCKED))
+                    .context("Failed to publish a newly created key.")
+            };
+            let result = create_and_publish();
+            assert_eq!(
+                service_specific(rollback.finish(result)),
+                ResponseCode::LOCKED.0
+            );
+            assert_eq!(*deleted.borrow(), vec![vec![1, 2, 3]]);
+        }
+    }
+
+    #[test]
+    fn key_blob_rollback_keeps_published_key_and_ignores_failed_creation() {
+        let deleted = RefCell::new(Vec::new());
+        let make_rollback = || {
+            KeyBlobRollback::new(|blob| {
+                deleted.borrow_mut().push(blob.to_vec());
+                Ok(())
+            })
+        };
+        let rollback = make_rollback();
+        rollback.record(&[4, 5, 6]);
+        assert_eq!(rollback.finish(Ok(17)).unwrap(), 17);
+
+        let result: Result<()> = Err(Error::Km(ErrorCode::INVALID_ARGUMENT).into());
+        assert_eq!(
+            service_specific(make_rollback().finish(result)),
+            ErrorCode::INVALID_ARGUMENT.0
+        );
+        assert!(deleted.borrow().is_empty());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { exec, spawn } from 'kernelsu-alt'
-import { normalizePackageNames } from './package_name'
+import { normalizeScoopTargets, parseScoopTarget } from './package_name'
 import {
   ANDROID_SECURITY_BULLETIN_MIRROR_URL,
   ANDROID_SECURITY_BULLETIN_URL,
@@ -16,32 +16,17 @@ const MAX_BULLETIN_BYTES = 2 * 1024 * 1024
 const MAX_PIF_CATALOG_BYTES = 64 * 1024
 const MAX_PIF_STATE_BYTES = 2 * 1024
 const MAX_SOTER_HAL_JSON_BYTES = 16 * 1024
+const MAX_DIAGNOSTICS_JSON_BYTES = 8 * 1024
+const MAX_KEYBOX_INSPECTOR_JSON_BYTES = 32 * 1024
+const MAX_APP_PATCH_LEVELS_JSON_BYTES = 64 * 1024
+const DEFAULT_SOTER_RELAY_URL = 'http://110.40.170.96:10886'
+const DEFAULT_SOTER_RELAY_DEVICE_ID = 'device-b-c3f204aa'
+const DEFAULT_SOTER_RELAY_TOKEN = 'aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd'
 const MAX_PIF_DEVICES = 64
 const MAX_PIF_MODEL_LENGTH = 128
 const MAX_PIF_PRODUCT_LENGTH = 128
 const MAX_PIF_FINGERPRINT_LENGTH = 1024
-const MAX_ACTIVITY_ENTRIES = 30
-const MAX_ACTIVITY_DETAIL_BYTES = 256
-const MAX_ACTIVITY_TIMESTAMP = 253_402_300_799
 const PIF_PRODUCT_RE = /^[a-z0-9][a-z0-9_]*$/
-
-const ACTIVITY_ACTIONS = [
-  'targets_saved',
-  'keybox_changed',
-  'widevine_installed',
-  'security_patch_synced',
-  'security_patch_restored',
-  'pif_enabled',
-  'pif_disabled',
-  'adb_disabler_changed', // Read-only compatibility for existing activity records.
-] as const
-export type ActivityAction = typeof ACTIVITY_ACTIONS[number]
-
-export interface ActivityEntry {
-  action: ActivityAction
-  detail: string
-  timestamp: number
-}
 
 export const MAX_KEYBOX_XML_BYTES = 64 * 1024
 
@@ -70,6 +55,7 @@ export interface SoterBetaState {
 /** Configuration for the Qualcomm Soter HAL relay. */
 export interface SoterHalState {
   enabled: boolean
+  remote_enabled: boolean
   url: string
   token: string
   device_id: string
@@ -92,6 +78,98 @@ export interface KeyboxState {
   level: KeyboxLevel
   play_integrity: PlayIntegrityStatus
   revocation: KeyboxRevocationStatus
+}
+
+export interface KeyboxChainInspector {
+  algorithm: 'RSA' | 'EC'
+  chain_length: number
+  serials: string[]
+  leaf_subject: string
+  leaf_issuer: string
+  valid_from: string
+  valid_until: string
+  certificates: KeyboxCertificateInspector[]
+}
+
+export interface KeyboxCertificateInspector {
+  serial: string
+  subject: string
+  issuer: string
+  valid_from: string
+  valid_until: string
+}
+
+export interface KeyboxInspector {
+  valid: boolean
+  bundled: boolean
+  rsa: KeyboxChainInspector | null
+  ec: KeyboxChainInspector | null
+}
+
+export interface AppPatchLevels {
+  os_patchlevel: string | null
+  vendor_patchlevel: string | null
+  boot_patchlevel: string | null
+}
+
+export type AppPatchProfiles = Record<string, AppPatchLevels>
+
+export function isAppPatchLevel(value: string | null, boot = false): boolean {
+  return value === null || value === 'auto' || isSecurityPatchDate(value)
+    || (boot && /^\d+$/.test(value) && Number(value) <= 0xffff_ffff)
+}
+
+function parseAppPatchProfiles(output: string): AppPatchProfiles {
+  const parsed = parseCanonicalJson(output, 'app patch levels')
+  if (!isRecord(parsed) || !hasOnlyKeys(parsed, ['app_patch_levels'])
+      || !isRecord(parsed.app_patch_levels)) {
+    throw new Error('OMK returned invalid app patch levels')
+  }
+  const profiles = Object.create(null) as AppPatchProfiles
+  const fields = ['os_patchlevel', 'vendor_patchlevel', 'boot_patchlevel'] as const
+  for (const [target, value] of Object.entries(parsed.app_patch_levels)) {
+    const selector = parseScoopTarget(target)
+    if (!selector || selector.kind === 'uid' || !isRecord(value)
+        || Object.keys(value).some(field => !(fields as readonly string[]).includes(field))) {
+      throw new Error('OMK returned an invalid app patch profile')
+    }
+    const profile: AppPatchLevels = { os_patchlevel: null, vendor_patchlevel: null, boot_patchlevel: null }
+    for (const field of fields) {
+      const level = value[field]
+      if (level === undefined || level === null || level === 'auto') continue
+      if (typeof level !== 'string' || !isAppPatchLevel(level, field === 'boot_patchlevel')) {
+        throw new Error('OMK returned an invalid app patch level')
+      }
+      profile[field] = level
+    }
+    profiles[selector.target] = profile
+  }
+  return profiles
+}
+
+export type ServiceDiagnosticStatus = 'running' | 'stopped' | 'configured' | 'disabled' | 'unknown' | 'available' | 'unavailable' | 'error'
+
+export interface ServiceDiagnostic {
+  status: ServiceDiagnosticStatus
+  pid: number | null
+}
+
+export interface DiagnosticsState {
+  keymint: ServiceDiagnostic
+  keystore2: ServiceDiagnostic
+  injector: ServiceDiagnostic
+  soter: ServiceDiagnostic
+  tee: HardwareDiagnostic
+  strongbox: HardwareDiagnostic
+  rkp_tee: ServiceDiagnostic
+  rkp_strongbox: ServiceDiagnostic
+  selinux: 'enforcing' | 'permissive' | 'unknown'
+}
+
+export interface HardwareDiagnostic {
+  status: 'available' | 'unavailable' | 'error'
+  version: number | null
+  name: string | null
 }
 
 function parseCanonicalJson(output: string, description: string): unknown {
@@ -200,33 +278,121 @@ function parseKeyboxState(output: string): KeyboxState {
   }
 }
 
-function parseActivityLog(output: string): ActivityEntry[] {
-  const parsed = parseCanonicalJson(output, 'WebUI activity log')
-  if (!Array.isArray(parsed) || parsed.length > MAX_ACTIVITY_ENTRIES) {
-    throw new Error('OMK returned an invalid WebUI activity log')
+function parseKeyboxChainInspector(value: unknown, algorithm: KeyboxChainInspector['algorithm']): KeyboxChainInspector {
+  if (!isRecord(value)
+      || !hasOnlyKeys(
+        value,
+        ['algorithm', 'chain_length', 'serials', 'leaf_subject', 'leaf_issuer', 'valid_from', 'valid_until', 'certificates'],
+      )
+      || value.algorithm !== algorithm
+      || typeof value.chain_length !== 'number'
+      || !Number.isSafeInteger(value.chain_length)
+      || value.chain_length < 1
+      || value.chain_length > 16
+      || !Array.isArray(value.serials)
+      || value.serials.length !== value.chain_length
+      || value.serials.some(serial => !isSafeText(serial, 256))
+      || !isSafeText(value.leaf_subject, 2048)
+      || !isSafeText(value.leaf_issuer, 2048)
+      || !isSafeText(value.valid_from, 128)
+      || !isSafeText(value.valid_until, 128)
+      || !Array.isArray(value.certificates)
+      || value.certificates.length !== value.chain_length
+      || value.certificates.some(certificate => {
+        if (!isRecord(certificate)
+            || !hasOnlyKeys(certificate, ['serial', 'subject', 'issuer', 'valid_from', 'valid_until'])
+            || !isSafeText(certificate.serial, 256)
+            || !isSafeText(certificate.subject, 2048)
+            || !isSafeText(certificate.issuer, 2048)
+            || !isSafeText(certificate.valid_from, 128)
+            || !isSafeText(certificate.valid_until, 128)) {
+          return true
+        }
+        return false
+      })) {
+    throw new Error('OMK returned an invalid Keybox certificate chain')
   }
+  return {
+    algorithm,
+    chain_length: value.chain_length,
+    serials: value.serials,
+    leaf_subject: value.leaf_subject,
+    leaf_issuer: value.leaf_issuer,
+    valid_from: value.valid_from,
+    valid_until: value.valid_until,
+    certificates: value.certificates.map(certificate => ({
+      serial: certificate.serial as string,
+      subject: certificate.subject as string,
+      issuer: certificate.issuer as string,
+      valid_from: certificate.valid_from as string,
+      valid_until: certificate.valid_until as string,
+    })),
+  }
+}
 
-  const actions = new Set<string>(ACTIVITY_ACTIONS)
-  return parsed.map(value => {
-    if (!isRecord(value)
-        || !hasOnlyKeys(value, ['action', 'detail', 'timestamp'])
-        || typeof value.action !== 'string'
-        || !actions.has(value.action)
-        || typeof value.detail !== 'string'
-        || new TextEncoder().encode(value.detail).byteLength > MAX_ACTIVITY_DETAIL_BYTES
-        || /[\u0000-\u001f\u007f]/.test(value.detail)
-        || typeof value.timestamp !== 'number'
-        || !Number.isSafeInteger(value.timestamp)
-        || value.timestamp <= 0
-        || value.timestamp > MAX_ACTIVITY_TIMESTAMP) {
-      throw new Error('OMK returned an invalid WebUI activity entry')
-    }
-    return {
-      action: value.action as ActivityAction,
-      detail: value.detail,
-      timestamp: value.timestamp,
-    }
-  })
+function parseKeyboxInspector(output: string): KeyboxInspector {
+  const parsed = parseCanonicalJson(output, 'Keybox inspector')
+  if (!isRecord(parsed)
+      || !hasOnlyKeys(parsed, ['valid', 'bundled', 'rsa', 'ec'])
+      || typeof parsed.valid !== 'boolean'
+      || typeof parsed.bundled !== 'boolean'
+      || (parsed.rsa !== null && parsed.rsa === undefined)
+      || (parsed.ec !== null && parsed.ec === undefined)
+      || (!parsed.valid && parsed.bundled)) {
+    throw new Error('OMK returned an invalid Keybox inspector')
+  }
+  const rsa = parsed.rsa === null ? null : parseKeyboxChainInspector(parsed.rsa, 'RSA')
+  const ec = parsed.ec === null ? null : parseKeyboxChainInspector(parsed.ec, 'EC')
+  return { valid: parsed.valid, bundled: parsed.bundled, rsa, ec }
+}
+
+function parseServiceDiagnostic(value: unknown): ServiceDiagnostic {
+  if (!isRecord(value)
+      || !hasOnlyKeys(value, ['status', 'pid'])
+      || (value.status !== 'running'
+        && value.status !== 'stopped'
+        && value.status !== 'configured'
+        && value.status !== 'disabled'
+        && value.status !== 'available'
+        && value.status !== 'unavailable'
+        && value.status !== 'error'
+        && value.status !== 'unknown')
+      || (value.pid !== null
+        && (typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid < 1))) {
+    throw new Error('OMK returned an invalid service diagnostic')
+  }
+  return { status: value.status, pid: value.pid }
+}
+
+function parseHardwareDiagnostic(value: unknown): HardwareDiagnostic {
+  if (!isRecord(value)
+      || !hasOnlyKeys(value, ['status', 'version', 'name'])
+      || (value.status !== 'available' && value.status !== 'unavailable' && value.status !== 'error')
+      || (value.version !== null && (typeof value.version !== 'number' || !Number.isSafeInteger(value.version) || value.version < 0))
+      || (value.name !== null && !isSafeText(value.name, 512))) {
+    throw new Error('OMK returned an invalid hardware diagnostic')
+  }
+  return { status: value.status, version: value.version, name: value.name }
+}
+
+function parseDiagnostics(output: string): DiagnosticsState {
+  const parsed = parseCanonicalJson(output, 'service diagnostics')
+  if (!isRecord(parsed)
+      || !hasOnlyKeys(parsed, ['keymint', 'keystore2', 'injector', 'soter', 'tee', 'strongbox', 'rkp_tee', 'rkp_strongbox', 'selinux'])
+      || (parsed.selinux !== 'enforcing' && parsed.selinux !== 'permissive' && parsed.selinux !== 'unknown')) {
+    throw new Error('OMK returned invalid service diagnostics')
+  }
+  return {
+    keymint: parseServiceDiagnostic(parsed.keymint),
+    keystore2: parseServiceDiagnostic(parsed.keystore2),
+    injector: parseServiceDiagnostic(parsed.injector),
+    soter: parseServiceDiagnostic(parsed.soter),
+    tee: parseHardwareDiagnostic(parsed.tee),
+    strongbox: parseHardwareDiagnostic(parsed.strongbox),
+    rkp_tee: parseServiceDiagnostic(parsed.rkp_tee),
+    rkp_strongbox: parseServiceDiagnostic(parsed.rkp_strongbox),
+    selinux: parsed.selinux,
+  }
 }
 
 function encodeBase64Bytes(bytes: Uint8Array): string {
@@ -271,6 +437,35 @@ function parseSupportedAbi(output: string): SupportedAbi | null {
 export class Cli {
   #helperPaths: Promise<HelperPaths> | null = null
 
+  async getAppPatchLevels(): Promise<AppPatchProfiles> {
+    const { keymint } = await this.#getHelperPaths()
+    const output = await this.#run(keymint, ['--webui-get-app-patch-levels'], MAX_APP_PATCH_LEVELS_JSON_BYTES)
+    return parseAppPatchProfiles(output)
+  }
+
+  async setAppPatchLevels(target: string, levels: AppPatchLevels): Promise<void> {
+    const selector = parseScoopTarget(target)
+    if (!selector || selector.kind === 'uid'
+        || !isAppPatchLevel(levels.os_patchlevel)
+        || !isAppPatchLevel(levels.vendor_patchlevel)
+        || !isAppPatchLevel(levels.boot_patchlevel, true)) {
+      throw new Error('Invalid app patch-level configuration')
+    }
+    const effective: AppPatchLevels = {
+      os_patchlevel: levels.os_patchlevel === 'auto' ? null : levels.os_patchlevel,
+      vendor_patchlevel: levels.vendor_patchlevel === 'auto' ? null : levels.vendor_patchlevel,
+      boot_patchlevel: levels.boot_patchlevel === 'auto' ? null : levels.boot_patchlevel,
+    }
+    const payload = encodeBase64Utf8(JSON.stringify({ target: selector.target, ...effective }))
+    const { keymint } = await this.#getHelperPaths()
+    const output = await this.#run(keymint, ['--webui-set-app-patch-levels-base64', payload], 256)
+    if (output !== 'app_patch_levels_saved') throw new Error('OMK returned an unexpected app patch result')
+    const profiles = await this.getAppPatchLevels()
+    if (JSON.stringify(profiles[selector.target]) !== JSON.stringify(effective)) {
+      throw new Error('App patch-level configuration read-back did not match the saved values')
+    }
+  }
+
   async getScoop(): Promise<string[]> {
     const output = await this.#runInject(['--webui-get-scoop'])
     let parsed: unknown
@@ -279,14 +474,13 @@ export class Cli {
     } catch {
       throw new Error('OMK returned an invalid package list')
     }
-    return normalizePackageNames(parsed)
+    return normalizeScoopTargets(parsed)
   }
 
   async setScoop(packages: string[]): Promise<void> {
-    const normalized = normalizePackageNames(packages)
+    const normalized = normalizeScoopTargets(packages)
     const payload = encodeBase64Utf8(JSON.stringify(normalized))
     await this.#runInject(['--webui-set-scoop', payload])
-    await this.#recordActivity('targets_saved', String(normalized.length))
   }
 
   async installKeybox(contents: Uint8Array): Promise<void> {
@@ -301,13 +495,28 @@ export class Cli {
     }
     const { keymint } = await this.#getHelperPaths()
     await this.#run(keymint, ['--webui-install-keybox', ...chunks])
-    await this.#recordActivity('keybox_changed', '')
   }
 
   async getKeyboxState(): Promise<KeyboxState> {
     const { keymint } = await this.#getHelperPaths()
     const output = await this.#run(keymint, ['--webui-get-keybox-state'], 256)
     return parseKeyboxState(output)
+  }
+
+  async getKeyboxInspector(): Promise<KeyboxInspector> {
+    const { keymint } = await this.#getHelperPaths()
+    const output = await this.#run(
+      keymint,
+      ['--webui-get-keybox-inspector'],
+      MAX_KEYBOX_INSPECTOR_JSON_BYTES,
+    )
+    return parseKeyboxInspector(output)
+  }
+
+  async getDiagnostics(): Promise<DiagnosticsState> {
+    const { keymint } = await this.#getHelperPaths()
+    const output = await this.#run(keymint, ['--webui-get-diagnostics'], MAX_DIAGNOSTICS_JSON_BYTES)
+    return parseDiagnostics(output)
   }
 
   async checkKeyboxRevocation(): Promise<KeyboxRevocationStatus> {
@@ -344,8 +553,9 @@ export class Cli {
     const output = await this.#run(keymint, ['--webui-get-soter-hal'], MAX_SOTER_HAL_JSON_BYTES + 1)
     const parsed = parseCanonicalJson(output, 'Soter HAL state')
     if (!isRecord(parsed)
-        || !hasOnlyKeys(parsed, ['enabled', 'url', 'token', 'device_id', 'tls_insecure', 'uid_map'])
+        || !hasOnlyKeys(parsed, ['enabled', 'remote_enabled', 'url', 'token', 'device_id', 'tls_insecure', 'uid_map'])
         || typeof parsed.enabled !== 'boolean'
+        || typeof parsed.remote_enabled !== 'boolean'
         || typeof parsed.url !== 'string'
         || typeof parsed.token !== 'string'
         || typeof parsed.device_id !== 'string'
@@ -358,7 +568,19 @@ export class Cli {
 
   async setSoterHal(state: SoterHalState): Promise<void> {
     const { keymint } = await this.#getHelperPaths()
-    const json = JSON.stringify(state)
+    // Native save resolves empty relay identity fields to the module defaults,
+    // including when the relay is currently disabled. Normalize before the
+    // write so the mandatory read-back check compares effective values.
+    const effectiveState: SoterHalState = {
+      ...state,
+      // The WebUI exposes one Soter switch: remote relay enabled also means
+      // the software TA must take over the vendor HAL.
+      enabled: state.remote_enabled,
+      url: state.url || DEFAULT_SOTER_RELAY_URL,
+      token: state.token || DEFAULT_SOTER_RELAY_TOKEN,
+      device_id: state.device_id || DEFAULT_SOTER_RELAY_DEVICE_ID,
+    }
+    const json = JSON.stringify(effectiveState)
     if (new TextEncoder().encode(json).byteLength > MAX_SOTER_HAL_JSON_BYTES) {
       throw new Error('Soter HAL configuration exceeds the byte limit')
     }
@@ -386,7 +608,6 @@ export class Cli {
     if (output !== date && output !== firstDayFallback) {
       throw new Error('OMK returned an unexpected security-patch date')
     }
-    await this.#recordActivity('security_patch_synced', output)
     return output
   }
 
@@ -396,7 +617,6 @@ export class Cli {
     if (output !== 'auto') {
       throw new Error('OMK returned an unexpected security-patch mode')
     }
-    await this.#recordActivity('security_patch_restored', '')
   }
 
   async getSystemSecurityPatch(): Promise<string> {
@@ -426,18 +646,6 @@ export class Cli {
     if (output !== 'normal') {
       throw new Error('OMK returned an unexpected TEE status')
     }
-  }
-
-  async getActivityLog(): Promise<ActivityEntry[]> {
-    const { keymint } = await this.#getHelperPaths()
-    const output = await this.#run(keymint, ['--webui-get-activity-log'], 16 * 1024)
-    return parseActivityLog(output)
-  }
-
-  async clearActivityLog(): Promise<void> {
-    const { keymint } = await this.#getHelperPaths()
-    const output = await this.#run(keymint, ['--webui-clear-activity-log'], 256)
-    if (output !== 'ok') throw new Error('OMK returned an unexpected activity-log result')
   }
 
   async fetchSecurityBulletin(): Promise<string> {
@@ -498,10 +706,6 @@ export class Cli {
     if (!state.enabled || state.product !== product) {
       throw new Error('OMK returned an unexpected PIF fingerprint state')
     }
-    await this.#recordActivity(
-      'pif_enabled',
-      JSON.stringify({ model: state.model, securityPatch: state.security_patch }),
-    )
     return state
   }
 
@@ -514,24 +718,7 @@ export class Cli {
     )
     const state = parsePifState(output)
     if (state.enabled) throw new Error('OMK did not disable PIF fingerprint spoofing')
-    await this.#recordActivity('pif_disabled', '')
     return state
-  }
-
-  async #recordActivity(action: ActivityAction, detail: string): Promise<void> {
-    try {
-      const { keymint } = await this.#getHelperPaths()
-      const encodedDetail = encodeBase64Utf8(detail)
-      const output = await this.#run(
-        keymint,
-        ['--webui-record-activity', action, encodedDetail],
-        256,
-      )
-      if (output !== 'ok') throw new Error('OMK returned an unexpected activity-log result')
-    } catch (error) {
-      // Activity history is supplementary and must not turn a completed operation into a failure.
-      console.error('Unable to record WebUI activity:', error)
-    }
   }
 
   async #runInject(args: string[]): Promise<string> {

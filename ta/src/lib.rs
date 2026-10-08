@@ -309,6 +309,15 @@ pub struct HalInfo {
     pub vendor_patchlevel: u32,
 }
 
+/// Immutable patch levels selected from the current caller's configuration.
+/// These never replace the TA's device-wide boot/HAL state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPatchLevels {
+    pub os_patchlevel: u32,
+    pub vendor_patchlevel: u32,
+    pub boot_patchlevel: u32,
+}
+
 /// Identifier for a keyblob.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct KeyId([u8; 32]);
@@ -475,6 +484,15 @@ impl KeyMintTa {
         key_blob: &[u8],
         params: &[KeyParam],
     ) -> Result<(keyblob::PlaintextKeyBlob, Option<SecureDeletionSlot>), Error> {
+        self.keyblob_parse_decrypt_with_patchlevels(key_blob, params, None)
+    }
+
+    fn keyblob_parse_decrypt_with_patchlevels(
+        &self,
+        key_blob: &[u8],
+        params: &[KeyParam],
+        patchlevels: Option<RequestPatchLevels>,
+    ) -> Result<(keyblob::PlaintextKeyBlob, Option<SecureDeletionSlot>), Error> {
         let KeyBlobDecryptionResult {
             keyblob,
             slot,
@@ -532,21 +550,33 @@ impl KeyMintTa {
                 }
                 KeyParam::OsPatchlevel(v) => {
                     if let Some(hal_info) = &self.hal_info {
-                        check(v, hal_info.os_patchlevel, "OS patchlevel")?;
+                        check(
+                            v,
+                            patchlevels.map_or(hal_info.os_patchlevel, |p| p.os_patchlevel),
+                            "OS patchlevel",
+                        )?;
                     } else {
                         error!("OS patchlevel not available, can't check for upgrade from {v}");
                     }
                 }
                 KeyParam::VendorPatchlevel(v) => {
                     if let Some(hal_info) = &self.hal_info {
-                        check(v, hal_info.vendor_patchlevel, "vendor patchlevel")?;
+                        check(
+                            v,
+                            patchlevels.map_or(hal_info.vendor_patchlevel, |p| p.vendor_patchlevel),
+                            "vendor patchlevel",
+                        )?;
                     } else {
                         error!("vendor patchlevel not available, can't check for upgrade from {v}");
                     }
                 }
                 KeyParam::BootPatchlevel(v) => {
                     if let Some(boot_info) = &self.boot_info {
-                        check(v, boot_info.boot_patchlevel, "boot patchlevel")?;
+                        check(
+                            v,
+                            patchlevels.map_or(boot_info.boot_patchlevel, |p| p.boot_patchlevel),
+                            "boot patchlevel",
+                        )?;
                     } else {
                         error!("boot patchlevel not available, can't check for upgrade from {v}");
                     }
@@ -844,6 +874,14 @@ impl KeyMintTa {
     /// request fields as parameters to the method.  In the opposite direction,
     /// build a response message from the values returned by the method.
     pub fn process_req(&mut self, req: PerformOpReq) -> PerformOpResponse {
+        self.process_req_with_patchlevels(req, None)
+    }
+
+    pub fn process_req_with_patchlevels(
+        &mut self,
+        req: PerformOpReq,
+        patchlevels: Option<RequestPatchLevels>,
+    ) -> PerformOpResponse {
         match req {
             // Internal messages.
             PerformOpReq::SetBootInfo(req) => {
@@ -924,7 +962,11 @@ impl KeyMintTa {
                 Err(e) => op_error_rsp(AddRngEntropyRequest::CODE, e),
             },
             PerformOpReq::DeviceGenerateKey(req) => {
-                match self.generate_key(&req.key_params, req.attestation_key) {
+                match self.generate_key_with_patchlevels(
+                    &req.key_params,
+                    req.attestation_key,
+                    patchlevels,
+                ) {
                     Ok(ret) => {
                         op_ok_rsp(PerformOpRsp::DeviceGenerateKey(GenerateKeyResponse { ret }))
                     }
@@ -932,25 +974,26 @@ impl KeyMintTa {
                 }
             }
             PerformOpReq::DeviceImportKey(req) => {
-                match self.import_key(
+                match self.import_key_with_patchlevels(
                     &req.key_params,
                     req.key_format,
                     &req.key_data,
                     req.attestation_key,
                     KeyImport::NonWrapped,
+                    patchlevels,
                 ) {
                     Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceImportKey(ImportKeyResponse { ret })),
                     Err(e) => op_error_rsp(ImportKeyRequest::CODE, e),
                 }
             }
             PerformOpReq::DeviceImportWrappedKey(req) => {
-                match self.import_wrapped_key(
+                match self.import_wrapped_key_with_patchlevels(
                     &req.wrapped_key_data,
                     &req.wrapping_key_blob,
                     &req.masking_key,
                     &req.unwrapping_params,
-                    req.password_sid,
-                    req.biometric_sid,
+                    (req.password_sid, req.biometric_sid),
+                    patchlevels,
                 ) {
                     Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceImportWrappedKey(
                         ImportWrappedKeyResponse { ret },
@@ -959,7 +1002,11 @@ impl KeyMintTa {
                 }
             }
             PerformOpReq::DeviceUpgradeKey(req) => {
-                match self.upgrade_key(&req.key_blob_to_upgrade, req.upgrade_params) {
+                match self.upgrade_key_with_patchlevels(
+                    &req.key_blob_to_upgrade,
+                    req.upgrade_params,
+                    patchlevels,
+                ) {
                     Ok(ret) => {
                         op_ok_rsp(PerformOpRsp::DeviceUpgradeKey(UpgradeKeyResponse { ret }))
                     }
@@ -991,7 +1038,13 @@ impl KeyMintTa {
                 }
             }
             PerformOpReq::DeviceBegin(req) => {
-                match self.begin_operation(req.purpose, &req.key_blob, req.params, req.auth_token) {
+                match self.begin_operation_with_patchlevels(
+                    req.purpose,
+                    &req.key_blob,
+                    req.params,
+                    req.auth_token,
+                    patchlevels,
+                ) {
                     Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceBegin(BeginResponse { ret })),
                     Err(e) => op_error_rsp(BeginRequest::CODE, e),
                 }
@@ -1011,7 +1064,12 @@ impl KeyMintTa {
                 }
             }
             PerformOpReq::DeviceGetKeyCharacteristics(req) => {
-                match self.get_key_characteristics(&req.key_blob, req.app_id, req.app_data) {
+                match self.get_key_characteristics_with_patchlevels(
+                    &req.key_blob,
+                    req.app_id,
+                    req.app_data,
+                    patchlevels,
+                ) {
                     Ok(ret) => op_ok_rsp(PerformOpRsp::DeviceGetKeyCharacteristics(
                         GetKeyCharacteristicsResponse { ret },
                     )),
@@ -1354,11 +1412,12 @@ impl KeyMintTa {
         }
     }
 
-    fn get_key_characteristics(
+    fn get_key_characteristics_with_patchlevels(
         &self,
         key_blob: &[u8],
         app_id: Vec<u8>,
         app_data: Vec<u8>,
+        patchlevels: Option<RequestPatchLevels>,
     ) -> Result<Vec<KeyCharacteristics>, Error> {
         // Parse and decrypt the keyblob, which requires extra hidden params.
         let mut params = vec_try_with_capacity!(2)?;
@@ -1368,7 +1427,8 @@ impl KeyMintTa {
         if !app_data.is_empty() {
             params.push(KeyParam::ApplicationData(app_data)); // capacity enough
         }
-        let (keyblob, _) = self.keyblob_parse_decrypt(key_blob, &params)?;
+        let (keyblob, _) =
+            self.keyblob_parse_decrypt_with_patchlevels(key_blob, &params, patchlevels)?;
         Ok(keyblob.characteristics)
     }
 
@@ -1410,6 +1470,7 @@ impl KeyMintTa {
         &self,
         chars: &mut Vec<KeyCharacteristics>,
         origin: KeyOrigin,
+        patchlevels: Option<RequestPatchLevels>,
     ) -> Result<(), Error> {
         for kc in chars {
             if kc.security_level == self.hw_info.security_level {
@@ -1417,13 +1478,18 @@ impl KeyMintTa {
                 if let Some(hal_info) = &self.hal_info {
                     kc.authorizations.try_extend_from_slice(&[
                         KeyParam::OsVersion(hal_info.os_version),
-                        KeyParam::OsPatchlevel(hal_info.os_patchlevel),
-                        KeyParam::VendorPatchlevel(hal_info.vendor_patchlevel),
+                        KeyParam::OsPatchlevel(
+                            patchlevels.map_or(hal_info.os_patchlevel, |p| p.os_patchlevel),
+                        ),
+                        KeyParam::VendorPatchlevel(
+                            patchlevels.map_or(hal_info.vendor_patchlevel, |p| p.vendor_patchlevel),
+                        ),
                     ])?;
                 }
                 if let Some(boot_info) = &self.boot_info {
-                    kc.authorizations
-                        .try_push(KeyParam::BootPatchlevel(boot_info.boot_patchlevel))?;
+                    kc.authorizations.try_push(KeyParam::BootPatchlevel(
+                        patchlevels.map_or(boot_info.boot_patchlevel, |p| p.boot_patchlevel),
+                    ))?;
                 }
                 return Ok(());
             }

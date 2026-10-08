@@ -373,10 +373,60 @@ fn webui_scoop_update_rejects_bad_input_without_overwriting() {
         "com.example\0app",
         "com.example-app",
         "com.ex\u{e9}mple.app",
+        "com.example@-1",
+        "com.example@42950",
+        "com.example@10@11",
+        "uid:-1",
+        "uid:4294967296",
+        "uid:0x10123",
         &"a".repeat(256),
     ] {
         assert!(replace_scoop_at_path(&path, vec![invalid_package.to_string()]).is_err());
         assert_eq!(fs::read_to_string(&*path).unwrap(), original);
+    }
+}
+
+#[test]
+fn caller_targets_round_trip_and_normalize_without_losing_bare_scope() {
+    let path = temp_config_path("webui-caller-targets");
+    fs::write(&*path, "version = 1\nscoop = []\n").unwrap();
+    replace_scoop_at_path(
+        &path,
+        [
+            " com.example@010 ",
+            "com.example@10",
+            "uid:0010123",
+            "com.example",
+            "uid:4294967295",
+            "com.example@42949",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    )
+    .unwrap();
+    assert_eq!(
+        read_scoop_from_path(&path).unwrap(),
+        [
+            "com.example@10",
+            "uid:10123",
+            "com.example",
+            "uid:4294967295",
+            "com.example@42949",
+        ]
+    );
+}
+
+#[test]
+fn malformed_caller_targets_reject_configuration() {
+    for target in [
+        "com.example@",
+        "com.example@x",
+        "uid:",
+        "uid:4294967296",
+        "*",
+    ] {
+        assert!(parse_config(&format!("version = 1\nscoop = [\"{target}\"]\n")).is_err());
     }
 }
 

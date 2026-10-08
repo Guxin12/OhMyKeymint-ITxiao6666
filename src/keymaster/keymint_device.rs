@@ -93,7 +93,9 @@ fn extract_u32(value: Option<regex::Match>) -> std::result::Result<u32, HalInfoE
 }
 
 /// Extract a patchlevel in form YYYYMM from a "YYYY-MM-DD" property value.
-fn extract_truncated_patchlevel(prop_value: &str) -> std::result::Result<u32, HalInfoError> {
+pub(crate) fn extract_truncated_patchlevel(
+    prop_value: &str,
+) -> std::result::Result<u32, HalInfoError> {
     let patchlevel_regex = Regex::new(PATCHLEVEL_REGEX)
         .map_err(|e| format!("failed to compile patchlevel regexp: {e:?}"))?;
 
@@ -258,27 +260,36 @@ impl KeyMintDevice {
     {
         let creation_result =
             map_km_error(creator(&self.km_dev)).context(err!("creator failed"))?;
-        let key_parameters = key_characteristics_to_internal(creation_result.keyCharacteristics);
-
-        let creation_date = DateTime::now().context(err!("DateTime::now() failed"))?;
-
-        let mut key_metadata = KeyMetaData::new();
-        key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
-        let mut blob_metadata = BlobMetaData::new();
-        let km_uuid = *self.km_uuid.read().unwrap();
-        blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
-
-        db.store_new_key(
-            key_desc,
-            key_type,
-            &key_parameters,
-            &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
-            &CertificateInfo::new(None, None),
-            &key_metadata,
-            &km_uuid,
-        )
-        .context(err!("store_new_key failed"))?;
-        Ok(())
+        let result = (|| {
+            let key_parameters =
+                key_characteristics_to_internal(creation_result.keyCharacteristics);
+            let creation_date = DateTime::now().context(err!("DateTime::now() failed"))?;
+            let mut key_metadata = KeyMetaData::new();
+            key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
+            let mut blob_metadata = BlobMetaData::new();
+            let km_uuid = *self.km_uuid.read().unwrap();
+            blob_metadata.add(BlobMetaEntry::KmUuid(km_uuid));
+            db.store_new_key(
+                key_desc,
+                key_type,
+                &key_parameters,
+                &BlobInfo::new(&creation_result.keyBlob, &blob_metadata),
+                &CertificateInfo::new(None, None),
+                &key_metadata,
+                &km_uuid,
+                None,
+            )
+            .context(err!("store_new_key failed"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // The new blob has not become a durable entry. Delete only this
+            // fresh blob and preserve the original publication error.
+            if let Err(error) = map_km_error(self.km_dev.deleteKey(&creation_result.keyBlob)) {
+                warn!("event=unpublished_internal_key_cleanup_failed error={error:?}");
+            }
+        }
+        result
     }
 
     /// Generate a KeyDescriptor for internal-use keys.
@@ -552,6 +563,7 @@ static EARLY_BOOT_ENDED: AtomicBool = AtomicBool::new(false);
 pub struct KeyMintWrapper {
     security_level: SecurityLevel,
     inner: Arc<KeyMintWrapperInner>,
+    request_patchlevels: Option<kmr_ta::RequestPatchLevels>,
 }
 
 struct KeyMintWrapperInner {
@@ -1046,7 +1058,16 @@ impl KeyMintWrapper {
         Ok(KeyMintWrapper {
             security_level,
             inner: shared_keymint_wrapper_inner(security_level)?,
+            request_patchlevels: None,
         })
+    }
+
+    pub fn with_patchlevels(&self, patchlevels: Option<kmr_ta::RequestPatchLevels>) -> Self {
+        Self {
+            security_level: self.security_level,
+            inner: self.inner.clone(),
+            request_patchlevels: patchlevels,
+        }
     }
 
     pub fn clear_attestation_cache(&self) {
@@ -1090,7 +1111,7 @@ impl KeyMintWrapper {
     fn process_ta_request(&self, req: PerformOpReq) -> PerformOpResponse {
         delay_ta_call(req.code());
         let mut ta = self.inner.keymint.lock().unwrap();
-        ta.process_req(req)
+        ta.process_req_with_patchlevels(req, self.request_patchlevels)
     }
 
     fn process_status_only(&self, req: PerformOpReq) -> Result<(), Error> {
@@ -1572,6 +1593,7 @@ pub fn clear_initialized_attestation_caches() {
         let keymint = KeyMintWrapper {
             security_level: SecurityLevel::TRUSTED_ENVIRONMENT,
             inner: wrapper.clone(),
+            request_patchlevels: None,
         };
         keymint.clear_attestation_cache();
     }
@@ -1580,6 +1602,7 @@ pub fn clear_initialized_attestation_caches() {
         let keymint = KeyMintWrapper {
             security_level: SecurityLevel::STRONGBOX,
             inner: wrapper.clone(),
+            request_patchlevels: None,
         };
         keymint.clear_attestation_cache();
     }
@@ -1879,12 +1902,14 @@ pub(crate) mod tests {
         test_ta_with_profile(
             KeyMintDevice::KEY_MINT_V5,
             kmr_wire::keymint::SecurityLevel::TrustedEnvironment,
+            None,
         )
     }
 
     fn test_ta_with_profile(
         version_number: i32,
         security_level: kmr_wire::keymint::SecurityLevel,
+        sdd_mgr: Option<Box<dyn kmr_common::keyblob::SecureDeletionSecretManager>>,
     ) -> KeyMintTa {
         let hw_info = HardwareInfo {
             version_number,
@@ -1903,7 +1928,7 @@ pub(crate) mod tests {
             keys: Box::new(soft::Keys::new([0; 32], [1; 32])),
             sign_info: None,
             attest_ids: None,
-            sdd_mgr: None,
+            sdd_mgr,
             bootloader: Box::new(kmr_ta::device::BootloaderDone),
             sk_wrapper: None,
             tup: Box::new(kmr_ta::device::TrustedPresenceUnsupported),
@@ -1929,6 +1954,330 @@ pub(crate) mod tests {
             boot_patchlevel: 20250605,
         }))
         .error_code
+    }
+
+    #[test]
+    fn wrapped_import_consumes_single_use_wrapping_key_only_after_success() {
+        use der::{asn1::AnyRef, Decode, Encode, Sequence};
+        use kmr_common::{
+            crypto::Rng,
+            keyblob::{
+                sdd_mem::InMemorySlotManager, EncryptedKeyBlob, SecureDeletionData,
+                SecureDeletionSecretManager, SecureDeletionSlot, SlotPurpose,
+            },
+            Error as KmError,
+        };
+        use kmr_wire::keymint::{
+            Algorithm, BlockMode, DateTime, Digest, KeyFormat, KeyOrigin, KeyPurpose, PaddingMode,
+            SecurityLevel,
+        };
+        use openssl::{
+            encrypt::Encrypter,
+            hash::MessageDigest,
+            pkey::PKey,
+            rsa::{Padding, Rsa},
+            symm::{encrypt, encrypt_aead, Cipher},
+        };
+
+        #[derive(Default)]
+        struct TestSddState {
+            manager: InMemorySlotManager<4>,
+            faulting_source: Option<SecureDeletionSlot>,
+            delete_attempts: Vec<SecureDeletionSlot>,
+        }
+
+        struct SharedSdd(Arc<Mutex<TestSddState>>);
+
+        impl SecureDeletionSecretManager for SharedSdd {
+            fn get_or_create_factory_reset_secret(
+                &mut self,
+                rng: &mut dyn Rng,
+            ) -> Result<SecureDeletionData, KmError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .manager
+                    .get_or_create_factory_reset_secret(rng)
+            }
+
+            fn get_factory_reset_secret(&self) -> Result<SecureDeletionData, KmError> {
+                self.0.lock().unwrap().manager.get_factory_reset_secret()
+            }
+
+            fn new_secret(
+                &mut self,
+                rng: &mut dyn Rng,
+                purpose: SlotPurpose,
+            ) -> Result<(SecureDeletionSlot, SecureDeletionData), KmError> {
+                self.0.lock().unwrap().manager.new_secret(rng, purpose)
+            }
+
+            fn get_secret(&self, slot: SecureDeletionSlot) -> Result<SecureDeletionData, KmError> {
+                self.0.lock().unwrap().manager.get_secret(slot)
+            }
+
+            fn delete_secret(&mut self, slot: SecureDeletionSlot) -> Result<(), KmError> {
+                let mut state = self.0.lock().unwrap();
+                state.delete_attempts.push(slot);
+                if let Some(source) = state.faulting_source {
+                    return Err(if slot == source {
+                        kmr_common::km_err!(
+                            SecureHwCommunicationFailed,
+                            "injected source consumption failure"
+                        )
+                    } else {
+                        kmr_common::km_err!(UnknownError, "injected destination cleanup failure")
+                    });
+                }
+                state.manager.delete_secret(slot)
+            }
+
+            fn delete_all(&mut self) {
+                self.0.lock().unwrap().manager.delete_all();
+            }
+        }
+
+        #[derive(Sequence)]
+        struct TestSecureKeyWrapper<'a> {
+            version: i32,
+            #[asn1(type = "OCTET STRING")]
+            encrypted_transport_key: &'a [u8],
+            #[asn1(type = "OCTET STRING")]
+            initialization_vector: &'a [u8],
+            key_description: AnyRef<'a>,
+            #[asn1(type = "OCTET STRING")]
+            encrypted_key: &'a [u8],
+            #[asn1(type = "OCTET STRING")]
+            tag: &'a [u8],
+        }
+
+        let slots = Arc::new(Mutex::new(TestSddState::default()));
+        let mut ta = test_ta_with_profile(
+            KeyMintDevice::KEY_MINT_V5,
+            SecurityLevel::TrustedEnvironment,
+            Some(Box::new(SharedSdd(slots.clone()))),
+        );
+        assert_eq!(set_boot_info(&mut ta), 0);
+        assert_eq!(
+            ta.process_req(PerformOpReq::SetHalInfo(SetHalInfoRequest {
+                os_version: 150000,
+                os_patchlevel: 202506,
+                vendor_patchlevel: 20250605,
+            }))
+            .error_code,
+            0
+        );
+        let wrapping_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let wrapping = ta.process_req(PerformOpReq::DeviceImportKey(ImportKeyRequest {
+            key_params: vec![
+                KeyParam::Algorithm(Algorithm::Rsa),
+                KeyParam::Purpose(KeyPurpose::WrapKey),
+                KeyParam::KeySize(KeySizeInBits(2048)),
+                KeyParam::RsaPublicExponent(RsaExponent(65537)),
+                KeyParam::Padding(PaddingMode::RsaOaep),
+                KeyParam::Digest(Digest::Sha256),
+                KeyParam::RsaOaepMgfDigest(Digest::Sha1),
+                KeyParam::UsageCountLimit(1),
+                KeyParam::NoAuthRequired,
+                KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
+                KeyParam::CertificateNotAfter(DateTime {
+                    ms_since_epoch: 2_000_000_000_000,
+                }),
+            ],
+            key_format: KeyFormat::Pkcs8,
+            key_data: wrapping_key.private_key_to_pkcs8().unwrap(),
+            attestation_key: None,
+        }));
+        assert_eq!(wrapping.error_code, 0, "{wrapping:?}");
+        let wrapping = match wrapping.rsp {
+            Some(PerformOpRsp::DeviceImportKey(response)) => response.ret,
+            response => panic!("unexpected wrapping key import response: {response:?}"),
+        };
+        assert!(wrapping.key_characteristics.iter().any(|chars| {
+            chars.security_level == SecurityLevel::TrustedEnvironment
+                && chars.authorizations.contains(&KeyParam::UsageCountLimit(1))
+        }));
+        let wrapping_slot = EncryptedKeyBlob::new(&wrapping.key_blob)
+            .unwrap()
+            .secure_deletion_slot()
+            .expect("single-use hardware wrapping key requires a secure deletion slot");
+        assert!(slots
+            .lock()
+            .unwrap()
+            .manager
+            .get_secret(wrapping_slot)
+            .is_ok());
+
+        let transport_key = [0x42; 32];
+        let masking_key = [0x73; 32];
+        let masked_transport_key: [u8; 32] =
+            std::array::from_fn(|index| transport_key[index] ^ masking_key[index]);
+        let mut encrypter = Encrypter::new(&wrapping_key).unwrap();
+        encrypter.set_rsa_padding(Padding::PKCS1_OAEP).unwrap();
+        encrypter.set_rsa_oaep_md(MessageDigest::sha256()).unwrap();
+        encrypter.set_rsa_mgf1_md(MessageDigest::sha1()).unwrap();
+        let mut encrypted_transport_key =
+            vec![0; encrypter.encrypt_len(&masked_transport_key).unwrap()];
+        let encrypted_len = encrypter
+            .encrypt(&masked_transport_key, &mut encrypted_transport_key)
+            .unwrap();
+        encrypted_transport_key.truncate(encrypted_len);
+
+        // Existing TA vector extended with UsageCountLimit(1) so the destination
+        // also owns a secure deletion slot: RAW AES-256, ECB, PKCS7, no auth.
+        let key_description = hex::decode(concat!(
+            "30350201033030a1083106020100020101a203020120a30402020100",
+            "a4053103020101a6053103020140bf831503020101bf8377020500"
+        ))
+        .unwrap();
+        let iv = [0x19; 12];
+        let mut tag = [0; 16];
+        let encrypted_key = encrypt_aead(
+            Cipher::aes_256_gcm(),
+            &transport_key,
+            Some(&iv),
+            &key_description,
+            &[0x64; 32],
+            &mut tag,
+        )
+        .unwrap();
+        let encode_wrapper = |tag: &[u8]| {
+            TestSecureKeyWrapper {
+                version: 0,
+                encrypted_transport_key: &encrypted_transport_key,
+                initialization_vector: &iv,
+                key_description: AnyRef::from_der(&key_description).unwrap(),
+                encrypted_key: &encrypted_key,
+                tag,
+            }
+            .to_der()
+            .unwrap()
+        };
+        let import_request = |wrapped_key_data| {
+            PerformOpReq::DeviceImportWrappedKey(ImportWrappedKeyRequest {
+                wrapped_key_data,
+                wrapping_key_blob: wrapping.key_blob.clone(),
+                masking_key: masking_key.to_vec(),
+                unwrapping_params: vec![
+                    KeyParam::Padding(PaddingMode::RsaOaep),
+                    KeyParam::Digest(Digest::Sha256),
+                    KeyParam::RsaOaepMgfDigest(Digest::Sha1),
+                ],
+                password_sid: 0,
+                biometric_sid: 0,
+            })
+        };
+        let mut bad_tag = tag;
+        bad_tag[0] ^= 1;
+        let failed = ta.process_req(import_request(encode_wrapper(&bad_tag)));
+        assert_eq!(failed.error_code, ErrorCode::VERIFICATION_FAILED.0);
+        {
+            let state = slots.lock().unwrap();
+            assert!(state.manager.get_secret(wrapping_slot).is_ok());
+            assert!(state.delete_attempts.is_empty());
+        }
+
+        let valid_wrapper = encode_wrapper(&tag);
+        slots.lock().unwrap().faulting_source = Some(wrapping_slot);
+        let failed_consumption = ta.process_req(import_request(valid_wrapper.clone()));
+        assert_eq!(
+            failed_consumption.error_code,
+            ErrorCode::SECURE_HW_COMMUNICATION_FAILED.0
+        );
+        assert!(failed_consumption.rsp.is_none());
+        {
+            let mut state = slots.lock().unwrap();
+            // Source consumption and destination cleanup both reached the manager.
+            // The cleanup failure must not replace the source error or publish a key.
+            assert_eq!(state.delete_attempts.len(), 2);
+            assert_eq!(state.delete_attempts[0], wrapping_slot);
+            assert_ne!(state.delete_attempts[1], wrapping_slot);
+            assert!(state.manager.get_secret(wrapping_slot).is_ok());
+            assert!(state.manager.get_secret(state.delete_attempts[1]).is_ok());
+            state.faulting_source = None;
+        }
+        let imported = ta.process_req(import_request(valid_wrapper.clone()));
+        assert_eq!(imported.error_code, 0, "{imported:?}");
+        let imported = match imported.rsp {
+            Some(PerformOpRsp::DeviceImportWrappedKey(response)) => response.ret,
+            response => panic!("unexpected wrapped import response: {response:?}"),
+        };
+        let destination_slot = EncryptedKeyBlob::new(&imported.key_blob)
+            .unwrap()
+            .secure_deletion_slot()
+            .expect("single-use destination requires a secure deletion slot");
+        {
+            let state = slots.lock().unwrap();
+            assert!(state.manager.get_secret(wrapping_slot).is_err());
+            assert!(state.manager.get_secret(destination_slot).is_ok());
+            assert_eq!(state.delete_attempts[2], wrapping_slot);
+        }
+        assert_eq!(
+            ta.process_req(import_request(valid_wrapper)).error_code,
+            ErrorCode::INVALID_KEY_BLOB.0
+        );
+
+        let characteristics = ta.process_req(PerformOpReq::DeviceGetKeyCharacteristics(
+            GetKeyCharacteristicsRequest {
+                key_blob: imported.key_blob.clone(),
+                app_id: vec![],
+                app_data: vec![],
+            },
+        ));
+        assert_eq!(characteristics.error_code, 0, "{characteristics:?}");
+        let characteristics = match characteristics.rsp {
+            Some(PerformOpRsp::DeviceGetKeyCharacteristics(response)) => response.ret,
+            response => panic!("unexpected imported key characteristics: {response:?}"),
+        };
+        assert_eq!(characteristics, imported.key_characteristics);
+        assert!(characteristics.iter().any(|chars| {
+            chars.security_level == SecurityLevel::TrustedEnvironment
+                && chars
+                    .authorizations
+                    .contains(&KeyParam::Algorithm(Algorithm::Aes))
+                && chars
+                    .authorizations
+                    .contains(&KeyParam::Origin(KeyOrigin::SecurelyImported))
+        }));
+
+        let begin = ta.process_req(PerformOpReq::DeviceBegin(BeginRequest {
+            purpose: KeyPurpose::Encrypt,
+            key_blob: imported.key_blob,
+            params: vec![
+                KeyParam::BlockMode(BlockMode::Ecb),
+                KeyParam::Padding(PaddingMode::Pkcs7),
+            ],
+            auth_token: None,
+        }));
+        assert_eq!(begin.error_code, 0, "{begin:?}");
+        let op_handle = match begin.rsp {
+            Some(PerformOpRsp::DeviceBegin(response)) => response.ret.op_handle,
+            response => panic!("unexpected imported key begin response: {response:?}"),
+        };
+        let plaintext = b"wrapped key regression";
+        let finish = ta.process_req(PerformOpReq::OperationFinish(FinishRequest {
+            op_handle,
+            input: Some(plaintext.to_vec()),
+            signature: None,
+            auth_token: None,
+            timestamp_token: None,
+            confirmation_token: None,
+        }));
+        assert_eq!(finish.error_code, 0, "{finish:?}");
+        let ciphertext = match finish.rsp {
+            Some(PerformOpRsp::OperationFinish(response)) => response.ret,
+            response => panic!("unexpected imported key finish response: {response:?}"),
+        };
+        assert_eq!(
+            ciphertext,
+            encrypt(Cipher::aes_256_ecb(), &[0x64; 32], None, plaintext).unwrap()
+        );
+        assert!(slots
+            .lock()
+            .unwrap()
+            .manager
+            .get_secret(destination_slot)
+            .is_err());
     }
 
     #[test]
@@ -1960,7 +2309,7 @@ pub(crate) mod tests {
                 (SecurityLevel::TrustedEnvironment, tee_capacity),
                 (SecurityLevel::Strongbox, 4),
             ] {
-                let mut ta = test_ta_with_profile(version, level);
+                let mut ta = test_ta_with_profile(version, level, None);
                 assert_eq!(set_boot_info(&mut ta), 0);
                 assert_eq!(
                     ta.process_req(PerformOpReq::SetHalInfo(SetHalInfoRequest {
@@ -2211,5 +2560,182 @@ pub(crate) mod tests {
             },
         ));
         assert_eq!(characteristics.error_code, 0);
+    }
+
+    #[test]
+    fn request_patch_profiles_bind_keys_without_mutating_global_or_live_operations() {
+        use kmr_wire::keymint::{Algorithm, Digest, KeyFormat, KeyPurpose};
+        let mut ta = test_ta();
+        assert_eq!(set_boot_info(&mut ta), 0);
+        assert_eq!(
+            ta.process_req(PerformOpReq::SetHalInfo(SetHalInfoRequest {
+                os_version: 160000,
+                os_patchlevel: 202506,
+                vendor_patchlevel: 20250605,
+            }))
+            .error_code,
+            0
+        );
+        let a = kmr_ta::RequestPatchLevels {
+            os_patchlevel: 202604,
+            vendor_patchlevel: 20260405,
+            boot_patchlevel: 20260405,
+        };
+        let b = kmr_ta::RequestPatchLevels {
+            os_patchlevel: 202605,
+            vendor_patchlevel: 20260505,
+            boot_patchlevel: 20260505,
+        };
+        let params = || {
+            vec![
+                KeyParam::Purpose(KeyPurpose::Sign),
+                KeyParam::Algorithm(Algorithm::Hmac),
+                KeyParam::KeySize(KeySizeInBits(256)),
+                KeyParam::Digest(Digest::Sha256),
+                KeyParam::MinMacLength(128),
+                KeyParam::NoAuthRequired,
+            ]
+        };
+        let generated = ta.process_req_with_patchlevels(
+            PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+                key_params: params(),
+                attestation_key: None,
+            }),
+            Some(a),
+        );
+        assert_eq!(generated.error_code, 0);
+        let key = match generated.rsp {
+            Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
+            response => panic!("{response:?}"),
+        };
+        let auths = &key.key_characteristics[0].authorizations;
+        assert!(auths.contains(&KeyParam::OsPatchlevel(a.os_patchlevel)));
+        assert!(auths.contains(&KeyParam::VendorPatchlevel(a.vendor_patchlevel)));
+        assert!(auths.contains(&KeyParam::BootPatchlevel(a.boot_patchlevel)));
+        let characteristics = |blob: Vec<u8>| {
+            PerformOpReq::DeviceGetKeyCharacteristics(GetKeyCharacteristicsRequest {
+                key_blob: blob,
+                app_id: vec![],
+                app_data: vec![],
+            })
+        };
+        assert_eq!(
+            ta.process_req_with_patchlevels(characteristics(key.key_blob.clone()), Some(a))
+                .error_code,
+            0
+        );
+        assert_eq!(
+            ta.process_req(characteristics(key.key_blob.clone()))
+                .error_code,
+            // The global value is June 2025, while profile A is April 2026.
+            ErrorCode::INVALID_KEY_BLOB.0
+        );
+        assert_eq!(
+            ta.process_req_with_patchlevels(characteristics(key.key_blob.clone()), Some(b))
+                .error_code,
+            ErrorCode::KEY_REQUIRES_UPGRADE.0
+        );
+        let begin = ta.process_req_with_patchlevels(
+            PerformOpReq::DeviceBegin(BeginRequest {
+                purpose: KeyPurpose::Sign,
+                key_blob: key.key_blob.clone(),
+                params: vec![KeyParam::Digest(Digest::Sha256), KeyParam::MacLength(128)],
+                auth_token: None,
+            }),
+            Some(a),
+        );
+        assert_eq!(begin.error_code, 0);
+        let handle = match begin.rsp {
+            Some(PerformOpRsp::DeviceBegin(rsp)) => rsp.ret.op_handle,
+            response => panic!("{response:?}"),
+        };
+        let imported = ta.process_req_with_patchlevels(
+            PerformOpReq::DeviceImportKey(ImportKeyRequest {
+                key_params: params(),
+                key_format: KeyFormat::Raw,
+                key_data: vec![7; 32],
+                attestation_key: None,
+            }),
+            Some(b),
+        );
+        assert_eq!(imported.error_code, 0);
+        let imported = match imported.rsp {
+            Some(PerformOpRsp::DeviceImportKey(rsp)) => rsp.ret,
+            response => panic!("{response:?}"),
+        };
+        assert!(imported.key_characteristics[0]
+            .authorizations
+            .contains(&KeyParam::OsPatchlevel(b.os_patchlevel)));
+        assert_eq!(
+            ta.process_req(PerformOpReq::OperationFinish(FinishRequest {
+                op_handle: handle,
+                input: Some(b"message".to_vec()),
+                signature: None,
+                auth_token: None,
+                timestamp_token: None,
+                confirmation_token: None,
+            }))
+            .error_code,
+            0
+        );
+        let upgraded = ta.process_req_with_patchlevels(
+            PerformOpReq::DeviceUpgradeKey(UpgradeKeyRequest {
+                key_blob_to_upgrade: key.key_blob,
+                upgrade_params: vec![],
+            }),
+            Some(b),
+        );
+        assert_eq!(upgraded.error_code, 0);
+        let upgraded = match upgraded.rsp {
+            Some(PerformOpRsp::DeviceUpgradeKey(rsp)) => rsp.ret,
+            response => panic!("{response:?}"),
+        };
+        assert_eq!(
+            ta.process_req_with_patchlevels(characteristics(upgraded.clone()), Some(b))
+                .error_code,
+            0
+        );
+        assert_eq!(
+            ta.process_req_with_patchlevels(characteristics(upgraded.clone()), Some(a))
+                .error_code,
+            ErrorCode::INVALID_KEY_BLOB.0
+        );
+        // OMK's explicit upgrade path also permits restoring a lower patch
+        // profile. Ordinary begin/characteristics still reject future blobs.
+        let restored = ta.process_req_with_patchlevels(
+            PerformOpReq::DeviceUpgradeKey(UpgradeKeyRequest {
+                key_blob_to_upgrade: upgraded,
+                upgrade_params: vec![],
+            }),
+            Some(a),
+        );
+        assert_eq!(restored.error_code, 0);
+        let restored = match restored.rsp {
+            Some(PerformOpRsp::DeviceUpgradeKey(rsp)) => rsp.ret,
+            response => panic!("{response:?}"),
+        };
+        assert_eq!(
+            ta.process_req_with_patchlevels(characteristics(restored), Some(a))
+                .error_code,
+            0
+        );
+        let global = ta.process_req(PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+            key_params: params(),
+            attestation_key: None,
+        }));
+        assert_eq!(global.error_code, 0);
+        let global = match global.rsp {
+            Some(PerformOpRsp::DeviceGenerateKey(rsp)) => rsp.ret,
+            response => panic!("{response:?}"),
+        };
+        assert!(global.key_characteristics[0]
+            .authorizations
+            .contains(&KeyParam::OsPatchlevel(202506)));
+        assert!(global.key_characteristics[0]
+            .authorizations
+            .contains(&KeyParam::VendorPatchlevel(20250605)));
+        assert!(global.key_characteristics[0]
+            .authorizations
+            .contains(&KeyParam::BootPatchlevel(20250605)));
     }
 }

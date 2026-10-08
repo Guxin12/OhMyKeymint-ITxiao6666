@@ -1,7 +1,7 @@
-import { exec, getPackagesInfo, listPackages } from 'kernelsu-alt'
+import { exec, getPackagesInfo } from 'kernelsu-alt'
 import type { PackagesInfo } from 'kernelsu-alt'
 import type { Config } from '../config'
-import { isValidPackageName } from '../package_name'
+import { isValidPackageName, parseScoopTarget } from '../package_name'
 import { isDev } from '../utils/dev'
 
 const RECOMMENDED_SYSTEM_APPS = [
@@ -42,14 +42,60 @@ function normalizeSearchQuery(query: string): string {
   return query.trim().toLocaleLowerCase()
 }
 
-async function queryInstalledPackages(type: 'all' | 'user' | 'system' = 'all'): Promise<string[]> {
+interface AndroidUser {
+  userId: number
+  current: boolean
+}
+
+async function queryAndroidUsers(): Promise<AndroidUser[]> {
+  let currentUserId: number | null = null
+  for (const command of ['am get-current-user', 'cmd activity get-current-user']) {
+    try {
+      const result = await exec(command)
+      const value = result.stdout.trim()
+      if (result.errno === 0 && /^\d+$/.test(value) && Number.isSafeInteger(Number(value))) {
+        currentUserId = Number(value)
+        break
+      }
+    } catch {
+      // Try the alternate ActivityManager command.
+    }
+  }
+  // A root WebUI bridge can belong to a different user than the foreground
+  // Android session. Never label a bridge package snapshot as user 0 or as an
+  // arbitrary profile when ActivityManager cannot identify the current user.
+  if (currentUserId === null) throw new Error('Unable to identify the current Android user')
+
+  const userIds = new Set([currentUserId])
+  for (const command of ['cmd user list', 'pm list users']) {
+    try {
+      const result = await exec(command)
+      if (result.errno !== 0) continue
+      for (const match of result.stdout.matchAll(/UserInfo\{(\d+):/g)) {
+        const userId = Number(match[1])
+        if (Number.isSafeInteger(userId)) userIds.add(userId)
+      }
+      if (userIds.size > 1 || /UserInfo\{/.test(result.stdout)) break
+    } catch {
+      // Listing profiles is best effort; the confirmed current user remains.
+    }
+  }
+  return [...userIds]
+    .sort((left, right) => left === currentUserId ? -1 : right === currentUserId ? 1 : left - right)
+    .map(userId => ({ userId, current: userId === currentUserId }))
+}
+
+async function queryInstalledPackages(
+  userId: number,
+  type: 'all' | 'user' | 'system' = 'all',
+): Promise<string[]> {
   // ksu.listPackages() can retain the package-manager snapshot from the
   // WebView process. Query Android's package manager directly on every fetch
   // so apps installed while the WebUI is open appear without a cold start.
   const filter = type === 'user' ? ' -3' : type === 'system' ? ' -s' : ''
   const commands = [
-    `/system/bin/pm list packages --user 0${filter}`,
-    `cmd package list packages --user 0${filter}`,
+    `/system/bin/pm list packages --user ${userId}${filter}`,
+    `cmd package list packages --user ${userId}${filter}`,
   ]
   for (const command of commands) {
     try {
@@ -63,25 +109,47 @@ async function queryInstalledPackages(type: 'all' | 'user' | 'system' = 'all'): 
         .filter(isValidPackageName)
       if (packages.length > 0 || result.stdout.trim() === '') return [...new Set(packages)].sort()
     } catch {
-      // Try the alternate package-manager command before using the bridge.
+      // Try the alternate package-manager command.
     }
   }
 
-  // Keep compatibility with older KernelSU/APatch WebUI bridges that do not
-  // expose exec but do provide listPackages.
-  return listPackages(type)
+  // listPackages/getPackagesInfo have no user argument. Falling back to that
+  // snapshot would misattribute apps to the requested profile.
+  throw new Error(`Unable to list installed packages for Android user ${userId}`)
 }
 
 export type SelectionFilter = 'all' | 'selected' | 'unselected'
 
-export interface AppEntry {
+/**
+ * The WebUI keeps the Android user alongside a package name so entries from
+ * different profiles can be selected using the injector's package@user scoop
+ * rules. Bare package entries still apply to every Android user.
+ */
+export interface PackageUserTarget {
   packageName: string
+  userId: number
+  targetKey: string
+}
+
+export function formatPackageUserTarget(packageName: string, userId: number): string {
+  return `${packageName}@${userId}`
+}
+
+export function parsePackageUserTarget(value: string): PackageUserTarget | null {
+  const target = parseScoopTarget(value)
+  if (target?.kind !== 'package-user') return null
+  return { packageName: target.packageName, userId: target.userId, targetKey: target.target }
+}
+
+export interface AppEntry extends PackageUserTarget {
+  currentUser: boolean
   appName: string
   isSystem: boolean
 }
 
 export interface SelectableAppEntry extends AppEntry {
   selected: boolean
+  selectedForAllUsers: boolean
 }
 
 export interface AppListSnapshot {
@@ -152,7 +220,11 @@ export class AppList {
     const normalizedQuery = normalizeSearchQuery(query)
     return this.#entries
       .filter(entry => !entry.isSystem)
-      .map(entry => ({ ...entry, selected: selected.has(entry.packageName) }))
+      .map(entry => ({
+        ...entry,
+        selected: selected.has(entry.packageName) || selected.has(entry.targetKey),
+        selectedForAllUsers: selected.has(entry.packageName),
+      }))
       .filter(entry => this.#matches(entry, normalizedQuery, filter))
       .sort((left, right) => this.#compareEntries(left, right))
   }
@@ -162,7 +234,11 @@ export class AppList {
     const normalizedQuery = normalizeSearchQuery(query)
     return this.#entries
       .filter(entry => entry.isSystem)
-      .map(entry => ({ ...entry, selected: selected.has(entry.packageName) }))
+      .map(entry => ({
+        ...entry,
+        selected: selected.has(entry.packageName) || selected.has(entry.targetKey),
+        selectedForAllUsers: selected.has(entry.packageName),
+      }))
       .filter(entry => this.#matchesSearch(entry, normalizedQuery))
       .sort((left, right) => this.#compareEntries(left, right))
   }
@@ -191,6 +267,29 @@ export class AppList {
     this.#emitChange()
   }
 
+  setTargetSelected(target: PackageUserTarget, selected: boolean): void {
+    if (parsePackageUserTarget(target.targetKey) === null) return
+    const targets = new Set(this.#config.get('target'))
+    if (selected) {
+      if (targets.has(target.packageName) || targets.has(target.targetKey)) return
+      targets.add(target.targetKey)
+    } else {
+      const removed = targets.delete(target.targetKey)
+      if (targets.delete(target.packageName)) {
+        // Editing one user of an existing all-user rule makes that package
+        // explicit for the other discovered users. Unmapped per-user and UID
+        // rules remain in the config instead of being discarded by this view.
+        for (const entry of this.#entries) {
+          if (entry.packageName === target.packageName && entry.userId !== target.userId) {
+            targets.add(entry.targetKey)
+          }
+        }
+      } else if (!removed) return
+    }
+    this.#config.set('target', [...targets])
+    this.#emitChange()
+  }
+
   toggleSelected(packageName: string): void {
     this.setSelected(packageName, !this.isSelected(packageName))
   }
@@ -207,8 +306,8 @@ export class AppList {
     let changed = false
     for (const entry of this.#entries) {
       if (!recommended.has(entry.packageName)) continue
-      if (targets.has(entry.packageName)) continue
-      targets.add(entry.packageName)
+      if (targets.has(entry.packageName) || targets.has(entry.targetKey)) continue
+      targets.add(entry.targetKey)
       changed = true
     }
     if (!changed) return
@@ -223,19 +322,22 @@ export class AppList {
   }
 
   applySystemAppSelection(checkedApps: readonly string[]): void {
+    const installedSystemTargets = new Set(
+      this.#entries.filter(entry => entry.isSystem).map(entry => entry.targetKey),
+    )
     const installedSystemApps = new Set(
       this.#entries.filter(entry => entry.isSystem).map(entry => entry.packageName),
     )
     const checked = new Set(
-      checkedApps.filter(packageName => (
-        isValidPackageName(packageName) && installedSystemApps.has(packageName)
+      checkedApps.filter(target => (
+        installedSystemTargets.has(target) || installedSystemApps.has(target)
       )),
     )
 
     const targets = new Set(this.#config.get('target'))
-    for (const packageName of installedSystemApps) {
-      if (checked.has(packageName)) targets.add(packageName)
-      else targets.delete(packageName)
+    for (const target of [...installedSystemApps, ...installedSystemTargets]) {
+      if (checked.has(target)) targets.add(target)
+      else targets.delete(target)
     }
     this.#config.set('target', [...targets])
     this.#emitChange()
@@ -252,9 +354,22 @@ export class AppList {
     // KernelSU package APIs cross a synchronous WebView bridge. Yield before
     // each call so the navigation and progress animations can reach the screen.
     await afterPaint()
-    const packages = await queryInstalledPackages()
-    await afterPaint()
-    const systemPackages = new Set(await queryInstalledPackages('system'))
+    const users = await queryAndroidUsers()
+    const discovered: { user: AndroidUser, packages: string[], systemPackages: Set<string> }[] = []
+    for (const user of users) {
+      try {
+        await afterPaint()
+        const packages = await queryInstalledPackages(user.userId)
+        await afterPaint()
+        const systemPackages = new Set(await queryInstalledPackages(user.userId, 'system'))
+        discovered.push({ user, packages, systemPackages })
+      } catch (error) {
+        if (user.current) throw error
+        // Locked, partial or removed profiles can be inaccessible. Keep the
+        // successfully queried users instead of discarding their app list.
+      }
+    }
+    const packages = [...new Set(discovered.flatMap(user => user.packages))]
     const installedPackages = new Set(packages)
 
     for (const packageName of this.#packageInfoCache.keys()) {
@@ -277,18 +392,24 @@ export class AppList {
       }
     }
 
-    return this.#replaceEntries(packages.map(packageName => {
-      const info = this.#packageInfoCache.get(packageName)
-      return {
-        packageName,
-        appName: typeof info?.appLabel === 'string' && info.appLabel
-          ? info.appLabel
-          : packageName,
-        // Labels can be absent from the WebView bridge, especially for overlays.
-        // PackageManager classification remains available independently.
-        isSystem: systemPackages.has(packageName) || info?.isSystem === true,
-      }
-    }))
+    return this.#replaceEntries(discovered.flatMap(({ user, packages, systemPackages }) => (
+      packages.map(packageName => {
+        const info = this.#packageInfoCache.get(packageName)
+        return {
+          packageName,
+          userId: user.userId,
+          currentUser: user.current,
+          targetKey: formatPackageUserTarget(packageName, user.userId),
+          appName: typeof info?.appLabel === 'string' && info.appLabel
+            ? info.appLabel
+            : packageName,
+          // The bridge cannot address a particular Android user. Labels can
+          // be reused, but installed state and classification come from the
+          // explicit per-user PackageManager query only.
+          isSystem: systemPackages.has(packageName),
+        }
+      })
+    )))
   }
 
   async #queryRecommendedPackages(): Promise<ReadonlySet<string>> {
@@ -298,12 +419,14 @@ export class AppList {
       userPackages = this.#entries.filter(entry => !entry.isSystem).map(entry => entry.packageName)
     } else {
       await afterPaint()
-      userPackages = await queryInstalledPackages('user')
+      userPackages = this.#entries.filter(entry => !entry.isSystem).map(entry => entry.packageName)
       // PackageManager limits this dump to users of these declared permissions;
       // it does not request the full installed-app dump or inspect private data.
       const commands = [
         'dumpsys -t 8 package permission moe.shizuku.manager.permission.API_V23 moe.shizuku.manager.permission.API android.permission.ACCESS_SUPERUSER com.topjohnwu.magisk.permission.REQUEST_SU',
-        'cmd package query-activities --brief --components --user 0 -a android.intent.action.MAIN -c de.robv.android.xposed.category.MODULE_SETTINGS',
+        ...[...new Set(this.#entries.map(entry => entry.userId))].map(userId => (
+          `cmd package query-activities --brief --components --user ${userId} -a android.intent.action.MAIN -c de.robv.android.xposed.category.MODULE_SETTINGS`
+        )),
       ]
       for (const command of commands) {
         await afterPaint()
@@ -326,10 +449,11 @@ export class AppList {
   }
 
   #replaceEntries(entries: AppEntry[]): boolean {
-    const previousEntries = new Map(this.#entries.map(entry => [entry.packageName, entry]))
+    const previousEntries = new Map(this.#entries.map(entry => [entry.targetKey, entry]))
     const changed = entries.length !== this.#entries.length || entries.some(entry => {
-      const previous = previousEntries.get(entry.packageName)
+      const previous = previousEntries.get(entry.targetKey)
       return previous?.appName !== entry.appName || previous.isSystem !== entry.isSystem
+        || previous.currentUser !== entry.currentUser
     })
     if (!changed) return false
 
@@ -351,12 +475,15 @@ export class AppList {
 
   #matchesSearch(entry: AppEntry, normalizedQuery: string): boolean {
     if (!normalizedQuery) return true
-    return `${entry.appName}\n${entry.packageName}`.toLocaleLowerCase().includes(normalizedQuery)
+    return `${entry.appName}\n${entry.packageName}\n${entry.targetKey}`
+      .toLocaleLowerCase()
+      .includes(normalizedQuery)
   }
 
   #compareEntries(left: SelectableAppEntry, right: SelectableAppEntry): number {
     if (left.selected !== right.selected) return left.selected ? -1 : 1
-    return left.appName.localeCompare(right.appName)
+    if (left.currentUser !== right.currentUser) return left.currentUser ? -1 : 1
+    return left.appName.localeCompare(right.appName) || left.userId - right.userId
   }
 
   #emitChange(): void {
@@ -367,12 +494,13 @@ export class AppList {
 
   #getDevEntries(): AppEntry[] {
     return [
-      { packageName: 'io.github.vvb2060.keyattestation', appName: 'Key Attestation', isSystem: false },
-      { packageName: 'com.example.app', appName: 'Example App', isSystem: false },
-      { packageName: 'com.example.banking', appName: 'Banking App', isSystem: false },
-      { packageName: 'com.google.android.gms', appName: 'Google Play services', isSystem: true },
-      { packageName: 'com.android.vending', appName: 'Google Play Store', isSystem: true },
-      { packageName: 'com.google.android.gsf', appName: 'Google Services Framework', isSystem: true },
+      { packageName: 'io.github.vvb2060.keyattestation', userId: 0, currentUser: true, targetKey: 'io.github.vvb2060.keyattestation@0', appName: 'Key Attestation', isSystem: false },
+      { packageName: 'com.example.app', userId: 0, currentUser: true, targetKey: 'com.example.app@0', appName: 'Example App', isSystem: false },
+      { packageName: 'com.example.banking', userId: 0, currentUser: true, targetKey: 'com.example.banking@0', appName: 'Banking App', isSystem: false },
+      { packageName: 'com.google.android.gms', userId: 0, currentUser: true, targetKey: 'com.google.android.gms@0', appName: 'Google Play services', isSystem: true },
+      { packageName: 'com.android.vending', userId: 0, currentUser: true, targetKey: 'com.android.vending@0', appName: 'Google Play Store', isSystem: true },
+      { packageName: 'com.google.android.gsf', userId: 0, currentUser: true, targetKey: 'com.google.android.gsf@0', appName: 'Google Services Framework', isSystem: true },
+      { packageName: 'com.example.app', userId: 10, currentUser: false, targetKey: 'com.example.app@10', appName: 'Example App', isSystem: false },
     ]
   }
 }

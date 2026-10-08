@@ -538,7 +538,7 @@ fn serialize_params(params: &[KeyParameter]) -> Result<Vec<u8>> {
         result.extend_from_slice(&(param.tag.0 as u32).to_ne_bytes());
         match &param.value {
             KeyParameterValue::Invalid(_v) => {
-                return Err(bloberr!("invalid tag found in {:?}", param))
+                return Err(bloberr!("invalid tag found: {:?}", param.tag))
             }
 
             // Enum-holding variants.
@@ -574,7 +574,7 @@ fn serialize_params(params: &[KeyParameter]) -> Result<Vec<u8>> {
                 blob_offset += blob_len;
             }
 
-            _ => return Err(bloberr!("unknown value found in {:?}", param)),
+            _ => return Err(bloberr!("unknown value for tag {:?}", param.tag)),
         }
     }
     let serialized_size = (result.len() - first_param_offset) as u32;

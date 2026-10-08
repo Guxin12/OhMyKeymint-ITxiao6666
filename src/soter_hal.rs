@@ -26,6 +26,10 @@ use crate::root_path;
 /// Shared with the software Soter TA and its native HAL watchdog.
 pub const CONFIG_PATH: &str = root_path!("data/soterta/remote.conf");
 const CONFIG_DIR: &str = root_path!("data/soterta");
+/// Persistent switch for taking over the vendor Soter service. It is kept as
+/// a separate on-disk marker for watchdog coordination, while the WebUI keeps
+/// it synchronized with `remote_enabled` through the single user-facing switch.
+pub const SOFTWARE_FLAG_PATH: &str = root_path!("data/soterta/enabled");
 const MAX_URL_BYTES: usize = 2048;
 const MAX_TOKEN_BYTES: usize = 1024;
 const MAX_DEVICE_ID_BYTES: usize = 512;
@@ -43,7 +47,10 @@ const DEFAULT_RELAY_TOKEN: &str = "aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd";
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Whether the software Soter TA owns the native HAL service.
     pub enabled: bool,
+    /// Whether the software TA forwards supported operations to the relay.
+    pub remote_enabled: bool,
     pub url: String,
     pub token: String,
     pub device_id: String,
@@ -77,7 +84,7 @@ impl Config {
         if !self.uid_map.is_empty() {
             validate_uid_map(&self.uid_map)?;
         }
-        if self.enabled {
+        if self.remote_enabled {
             if self.url.is_empty() {
                 bail!("Soter server URL is required when the relay is enabled");
             }
@@ -130,8 +137,12 @@ impl Config {
                 .ok_or_else(|| anyhow!("invalid Soter HAL configuration line"))?;
             let value = value.trim();
             match key.trim() {
-                "enabled" => {
-                    config.enabled = match value {
+                // `enabled` was the only switch in older OMK builds.  Keep
+                // accepting it as the relay switch so existing files remain
+                // readable; new files use the unambiguous `remote_enabled`
+                // spelling and store the takeover marker separately.
+                "enabled" | "remote_enabled" => {
+                    config.remote_enabled = match value {
                         "1" | "true" | "yes" | "on" => true,
                         "0" | "false" | "no" | "off" => false,
                         _ => bail!("invalid Soter HAL enabled value"),
@@ -157,11 +168,31 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        match fs::read_to_string(CONFIG_PATH) {
-            Ok(raw) => Self::parse_file(&raw),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).context("failed to read Soter HAL configuration"),
-        }
+        let mut config = match fs::read_to_string(CONFIG_PATH) {
+            Ok(raw) => {
+                let legacy = !raw.lines().any(|line| {
+                    line.split_once('=')
+                        .is_some_and(|(key, _)| key.trim() == "remote_enabled")
+                });
+                let mut config = Self::parse_file(&raw)?;
+                // Before the split, `enabled` controlled both the watchdog
+                // and remote forwarding.  Preserve that behavior once while
+                // upgrading a legacy file; a new file can explicitly keep
+                // the legacy takeover marker with remote forwarding enabled.
+                if legacy && config.remote_enabled {
+                    config.enabled = true;
+                }
+                config
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => Err(error).context("failed to read Soter HAL configuration")?,
+        };
+        // The WebUI has one Soter switch: a takeover is effective only when
+        // remote forwarding is enabled as well. The legacy `enabled=true`
+        // spelling above remains accepted during migration.
+        config.enabled =
+            config.remote_enabled && (config.enabled || Path::new(SOFTWARE_FLAG_PATH).is_file());
+        Ok(config)
     }
 }
 
@@ -227,8 +258,12 @@ fn validate_uid_map(value: &str) -> Result<()> {
 
 fn file_contents(config: &Config) -> String {
     format!(
-        "enabled={}\nurl={}\ntoken={}\ndevice_id={}\ntls_insecure={}\nuid_map={}\n",
-        if config.enabled { "true" } else { "false" },
+        "remote_enabled={}\nurl={}\ntoken={}\ndevice_id={}\ntls_insecure={}\nuid_map={}\n",
+        if config.remote_enabled {
+            "true"
+        } else {
+            "false"
+        },
         config.url,
         config.token,
         config.device_id,
@@ -243,7 +278,10 @@ pub fn state_json() -> Result<String> {
 }
 
 pub fn is_enabled() -> Result<bool> {
-    Ok(Config::load()?.enabled)
+    // Feature exclusivity follows the persisted relay switch, which is the
+    // single user-facing Soter setting. A stale takeover flag must not block
+    // Tencent Soter Beta after the relay has been disabled.
+    Ok(Config::load()?.remote_enabled)
 }
 
 fn ensure_config_dir() -> Result<()> {
@@ -254,6 +292,27 @@ fn ensure_config_dir() -> Result<()> {
     if unsafe { libc::chown(c_path.as_ptr(), KEYSTORE_UID, KEYSTORE_GID) } != 0 {
         return Err(std::io::Error::last_os_error())
             .context("failed to set Soter HAL configuration directory ownership");
+    }
+    Ok(())
+}
+
+fn write_software_flag(enabled: bool) -> Result<()> {
+    if enabled {
+        atomic_replace_preserving_metadata(
+            Path::new(SOFTWARE_FLAG_PATH),
+            b"1\n",
+            0o600,
+            KEYSTORE_UID,
+            KEYSTORE_GID,
+        )
+        .context("failed to enable the Soter HAL watchdog")?;
+        fs::set_permissions(SOFTWARE_FLAG_PATH, fs::Permissions::from_mode(0o600))?;
+    } else {
+        match fs::remove_file(SOFTWARE_FLAG_PATH) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to disable the Soter HAL watchdog"),
+        }
     }
     Ok(())
 }
@@ -285,6 +344,11 @@ fn refresh_watchdog(config_enabled: bool) -> Result<()> {
 }
 
 pub fn save(config: Config) -> Result<()> {
+    let mut config = config.with_webui_defaults();
+    // Keep the native bridge aligned with the single WebUI switch. Direct
+    // callers that send only `remote_enabled` must enable or disable takeover
+    // together with the relay rather than leaving a stale flag behind.
+    config.enabled = config.remote_enabled;
     config.validate()?;
     ensure_config_dir()?;
     let contents = file_contents(&config);
@@ -305,6 +369,7 @@ pub fn save(config: Config) -> Result<()> {
         return Err(std::io::Error::last_os_error())
             .context("failed to set Soter HAL configuration ownership");
     }
+    write_software_flag(config.enabled)?;
     refresh_watchdog(config.enabled)
 }
 
@@ -325,6 +390,7 @@ mod tests {
     fn webui_defaults_are_disabled_and_ready_to_enable() {
         let mut config = Config::default().with_webui_defaults();
         assert!(!config.enabled);
+        assert!(!config.remote_enabled);
         assert!(!config.tls_insecure);
         assert!(config.uid_map.is_empty());
         assert!(config.url == DEFAULT_RELAY_URL);
@@ -389,10 +455,10 @@ mod tests {
 
     #[test]
     fn partial_builtin_config_can_be_loaded_enabled_and_saved() {
-        for enabled in [false, true] {
+        for remote_enabled in [false, true] {
             for fields in 0..=7 {
                 let partial = Config {
-                    enabled,
+                    remote_enabled,
                     url: if fields & 1 != 0 {
                         DEFAULT_RELAY_URL.into()
                     } else {
@@ -411,7 +477,8 @@ mod tests {
                     ..Config::default()
                 };
                 let resolved = Config::parse_file(&file_contents(&partial)).unwrap();
-                assert_eq!(resolved.enabled, enabled);
+                assert!(!resolved.enabled);
+                assert_eq!(resolved.remote_enabled, remote_enabled);
                 assert!(resolved.url == DEFAULT_RELAY_URL);
                 assert!(resolved.device_id == DEFAULT_RELAY_DEVICE_ID);
                 assert!(resolved.token == DEFAULT_RELAY_TOKEN);
@@ -438,7 +505,7 @@ mod tests {
     #[test]
     fn enabled_config_requires_relay_identity() {
         let config = Config {
-            enabled: true,
+            remote_enabled: true,
             ..Config::default()
         };
         assert!(config.validate().is_err());
@@ -459,7 +526,8 @@ mod tests {
     #[test]
     fn file_format_matches_software_ta_parser() {
         let config = Config {
-            enabled: true,
+            enabled: false,
+            remote_enabled: true,
             url: "https://relay.example.test/base".into(),
             token: "relay-token".into(),
             device_id: "soter-b".into(),
@@ -471,11 +539,29 @@ mod tests {
     }
 
     #[test]
+    fn file_parser_accepts_legacy_and_split_switches() {
+        let legacy = Config::parse_file(&format!(
+            "enabled=true\nurl={DEFAULT_RELAY_URL}\ndevice_id={DEFAULT_RELAY_DEVICE_ID}\ntoken={DEFAULT_RELAY_TOKEN}\n"
+        ))
+        .unwrap();
+        assert!(legacy.remote_enabled);
+        assert!(!legacy.enabled);
+
+        let split = Config::parse_file(&format!(
+            "remote_enabled=true\nurl={DEFAULT_RELAY_URL}\ndevice_id={DEFAULT_RELAY_DEVICE_ID}\ntoken={DEFAULT_RELAY_TOKEN}\n"
+        ))
+        .unwrap();
+        assert!(split.remote_enabled);
+        assert!(!split.enabled);
+    }
+
+    #[test]
     fn webui_base64_preserves_shell_characters_and_empty_fields() {
         let configs = [
             Config::default(),
             Config {
                 enabled: true,
+                remote_enabled: true,
                 url: "https://relay.example.test/base?a=1&b=2".into(),
                 token: "quotes'\" $HOME `id` $(id);{}*\\+=".into(),
                 device_id: "device b".into(),
@@ -510,7 +596,8 @@ mod tests {
     #[test]
     fn webui_base64_accepts_valid_config_over_four_kib() {
         let config = Config {
-            enabled: true,
+            enabled: false,
+            remote_enabled: true,
             url: format!("https://relay.example.test/{}", "a".repeat(1800)),
             token: "a".repeat(MAX_TOKEN_BYTES),
             device_id: "b".repeat(MAX_DEVICE_ID_BYTES),

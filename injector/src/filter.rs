@@ -1,6 +1,6 @@
 use kmr_common::consts::{AID_APP_START, AID_USER_OFFSET};
 
-use crate::config::FilterConfig;
+use crate::config::{parse_scoop_target, FilterConfig, ScoopTarget};
 
 #[derive(Debug, Clone)]
 pub enum PackageResolution {
@@ -80,7 +80,14 @@ pub fn evaluate(
         .any(|pkg| config.deny_packages.contains(pkg))
     {
         FilterReason::RejectedByDenylist
-    } else if !packages.iter().any(|pkg| scoop.contains(pkg)) {
+    } else if !scoop.iter().any(|target| match parse_scoop_target(target) {
+        Some(ScoopTarget::Package(package)) => packages.iter().any(|pkg| pkg == package),
+        Some(ScoopTarget::PackageUser(package, user)) => {
+            user == uid / AID_USER_OFFSET && packages.iter().any(|pkg| pkg == package)
+        }
+        Some(ScoopTarget::Uid(target_uid)) => target_uid == uid,
+        None => false,
+    }) {
         FilterReason::RejectedNotInScope
     } else {
         FilterReason::Allowed

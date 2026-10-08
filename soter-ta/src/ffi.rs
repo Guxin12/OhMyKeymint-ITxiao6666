@@ -327,7 +327,7 @@ pub unsafe extern "C" fn soterta_handle(
             REMOTE_WAS_ACTIVE.store(true, Ordering::Release);
             true
         }
-        Ok(_) if std::path::Path::new(remote::CONFIG_PATH).is_file() => {
+        Ok(_) if remote::config_path().is_file() => {
             REMOTE_WAS_ACTIVE.store(false, Ordering::Release);
             false
         }

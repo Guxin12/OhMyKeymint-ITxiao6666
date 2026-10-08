@@ -634,6 +634,9 @@ fn ffi_serves_the_daemon_path_end_to_end() {
 
     let dir = std::env::temp_dir().join(format!("soterta-ffi-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    // Exercise the local FFI ledger even on a device with a live remote relay.
+    // Never read or send requests using that device's production configuration.
+    let _remote_config = crate::remote::test_config_path(dir.join("remote.conf"));
     let path = dir.join("state.json");
     let path_arg = CString::new(path.to_str().expect("utf-8 temp path")).expect("no NUL");
     let kname_arg = CString::new(KNAME).expect("no NUL");

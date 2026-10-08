@@ -13,8 +13,10 @@
 #   soterta.sh status       print the state, one key=value per line
 #   soterta.sh json         write and print the file the WebUI reads
 #
-# The WebUI never runs this script: it writes the flag and reads the published
-# status, so the panel needs no module-path discovery and no shell quoting.
+# The WebUI normally reaches this script through the native bridge, which
+# resolves the installed module path and invokes `enable` or `disable` after
+# atomically saving the configuration. The watchdog itself remains the source
+# of truth for the published runtime status below.
 #
 #   /data/misc/keystore/omk/data/soterta/enabled      present = software TA wanted
 #   /data/misc/keystore/omk/data/soterta/status.json  published by the watchdog
@@ -201,6 +203,34 @@ hal_state() {
   [ -n "$value" ] && echo "$value" || echo unknown
 }
 
+# The WebUI has one switch: remote_enabled controls both relay forwarding and
+# software-TA takeover. Keep accepting the old `enabled=true` spelling while
+# an installation is being migrated.
+remote_requested() {
+  if grep -Eq '^[[:space:]]*remote_enabled[[:space:]]*=[[:space:]]*(true|1|yes|on)[[:space:]]*$' "$TA_DIR/remote.conf" 2>/dev/null; then
+    echo 1
+  elif ! grep -Eq '^[[:space:]]*remote_enabled[[:space:]]*=' "$TA_DIR/remote.conf" 2>/dev/null \
+      && grep -Eq '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*(true|1|yes|on)[[:space:]]*$' "$TA_DIR/remote.conf" 2>/dev/null; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+# Older OMK releases stored the takeover and relay switches together as
+# `enabled=true` in remote.conf. Migrate that state once so an upgrade keeps
+# the software TA takeover active before the first WebUI save.
+migrate_legacy_flag() {
+  [ -f "$FLAG" ] && return 0
+  [ -r "$TA_DIR/remote.conf" ] || return 0
+  grep -Eq '^[[:space:]]*remote_enabled[[:space:]]*=' "$TA_DIR/remote.conf" 2>/dev/null && return 0
+  if grep -Eq '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*(true|1|yes|on)[[:space:]]*$' "$TA_DIR/remote.conf" 2>/dev/null; then
+    date +%s > "$FLAG"
+    chmod 0600 "$FLAG" 2>/dev/null
+    log "migrated legacy Soter takeover switch"
+  fi
+}
+
 # us = our daemon owns the service name, hal = the stock HAL does, none = nobody
 #
 # A live stock HAL is the last registrant even when our daemon is still alive:
@@ -325,13 +355,8 @@ restore_hal() {
 # Read-only snapshot; also safe to run while another converge holds the lock.
 snapshot_state() {
   g_enabled=0
-  # The WebUI persists the relay switch in remote.conf. Keep the legacy flag
-  # for manual enable/disable commands, but make the persisted configuration
-  # authoritative after a reboot.
-  if [ -r "$TA_DIR/remote.conf" ] && grep -Eq '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*(true|1|yes|on)[[:space:]]*$' "$TA_DIR/remote.conf" 2>/dev/null; then
-    g_enabled=1
-  fi
-  [ -f "$FLAG" ] && g_enabled=1
+  # The single WebUI switch owns both the takeover flag and remote forwarding.
+  [ -f "$FLAG" ] && [ "$(remote_requested)" = 1 ] && g_enabled=1
   g_pid=$(daemon_pid) || g_pid=
   g_running=0
   [ -n "$g_pid" ] && g_running=1
@@ -449,6 +474,7 @@ supervise() {
   g_last_body=
   g_last_write=0
   trap 'log "watchdog stopping; rolling back"; restore_hal; write_status >/dev/null 2>&1; exit 0' INT TERM EXIT
+  migrate_legacy_flag
   log "watchdog up (poll ${POLL}s, flag $FLAG)"
   while :; do
     # Publish the requested state before a long transition, so the WebUI never

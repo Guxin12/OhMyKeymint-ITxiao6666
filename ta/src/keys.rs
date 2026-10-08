@@ -319,18 +319,21 @@ impl crate::KeyMintTa {
         try_to_vec(&tag[..16])
     }
 
-    pub(crate) fn generate_key(
+    pub(crate) fn generate_key_with_patchlevels(
         &mut self,
         params: &[KeyParam],
         attestation_key: Option<AttestationKey>,
+        patchlevels: Option<crate::RequestPatchLevels>,
     ) -> Result<KeyCreationResult, Error> {
-        let (key_material, chars) = self.generate_key_material(params)?;
-        self.finish_keyblob_creation(
+        let (key_material, chars) =
+            self.generate_key_material_with_patchlevels(params, patchlevels)?;
+        self.finish_keyblob_creation_with_patchlevels(
             params,
             attestation_key,
             chars,
             key_material,
             keyblob::SlotPurpose::KeyGeneration,
+            patchlevels,
         )
     }
 
@@ -338,12 +341,20 @@ impl crate::KeyMintTa {
         &mut self,
         params: &[KeyParam],
     ) -> Result<(KeyMaterial, Vec<KeyCharacteristics>), Error> {
+        self.generate_key_material_with_patchlevels(params, None)
+    }
+
+    fn generate_key_material_with_patchlevels(
+        &mut self,
+        params: &[KeyParam],
+        patchlevels: Option<crate::RequestPatchLevels>,
+    ) -> Result<(KeyMaterial, Vec<KeyCharacteristics>), Error> {
         let (mut chars, keygen_info) = tag::extract_key_gen_characteristics(
             self.secure_storage_available(),
             params,
             self.hw_info.security_level,
         )?;
-        self.add_keymint_tags(&mut chars, KeyOrigin::Generated)?;
+        self.add_keymint_tags(&mut chars, KeyOrigin::Generated, patchlevels)?;
         let key_material = match keygen_info {
             crypto::KeyGenInfo::Aes(variant) => {
                 self.imp
@@ -385,13 +396,14 @@ impl crate::KeyMintTa {
         Ok((key_material, chars))
     }
 
-    pub(crate) fn import_key(
+    pub(crate) fn import_key_with_patchlevels(
         &mut self,
         params: &[KeyParam],
         key_format: KeyFormat,
         key_data: &[u8],
         attestation_key: Option<AttestationKey>,
         import_type: KeyImport,
+        patchlevels: Option<crate::RequestPatchLevels>,
     ) -> Result<KeyCreationResult, Error> {
         if !self.in_early_boot && get_bool_tag_value!(params, EarlyBootOnly)? {
             return Err(km_err!(
@@ -410,19 +422,20 @@ impl crate::KeyMintTa {
         )?;
         match import_type {
             KeyImport::NonWrapped => {
-                self.add_keymint_tags(&mut chars, KeyOrigin::Imported)?;
+                self.add_keymint_tags(&mut chars, KeyOrigin::Imported, patchlevels)?;
             }
             KeyImport::Wrapped => {
-                self.add_keymint_tags(&mut chars, KeyOrigin::SecurelyImported)?;
+                self.add_keymint_tags(&mut chars, KeyOrigin::SecurelyImported, patchlevels)?;
             }
         }
 
-        self.finish_keyblob_creation(
+        self.finish_keyblob_creation_with_patchlevels(
             params,
             attestation_key,
             chars,
             key_material,
             keyblob::SlotPurpose::KeyImport,
+            patchlevels,
         )
     }
 
@@ -434,6 +447,25 @@ impl crate::KeyMintTa {
         chars: Vec<KeyCharacteristics>,
         key_material: KeyMaterial,
         purpose: keyblob::SlotPurpose,
+    ) -> Result<KeyCreationResult, Error> {
+        self.finish_keyblob_creation_with_patchlevels(
+            params,
+            attestation_key,
+            chars,
+            key_material,
+            purpose,
+            None,
+        )
+    }
+
+    fn finish_keyblob_creation_with_patchlevels(
+        &mut self,
+        params: &[KeyParam],
+        attestation_key: Option<AttestationKey>,
+        chars: Vec<KeyCharacteristics>,
+        key_material: KeyMaterial,
+        purpose: keyblob::SlotPurpose,
+        patchlevels: Option<crate::RequestPatchLevels>,
     ) -> Result<KeyCreationResult, Error> {
         let keyblob = keyblob::PlaintextKeyBlob {
             // Don't include any `SecurityLevel::Keystore` characteristics in the set that is bound
@@ -478,9 +510,10 @@ impl crate::KeyMintTa {
 
                 if let Some(attest_keyinfo) = attestation_key.as_ref() {
                     // User-specified attestation key provided.
-                    (attest_keyblob, _) = self.keyblob_parse_decrypt(
+                    (attest_keyblob, _) = self.keyblob_parse_decrypt_with_patchlevels(
                         &attest_keyinfo.key_blob,
                         &attest_keyinfo.attest_key_params,
+                        patchlevels,
                     )?;
                     attest_keyblob
                         .suitable_for(KeyPurpose::AttestKey, self.hw_info.security_level)?;
@@ -596,21 +629,30 @@ impl crate::KeyMintTa {
         })
     }
 
-    pub(crate) fn import_wrapped_key(
+    pub(crate) fn import_wrapped_key_with_patchlevels(
         &mut self,
         wrapped_key_data: &[u8],
         wrapping_key_blob: &[u8],
         masking_key: &[u8],
         unwrapping_params: &[KeyParam],
-        password_sid: i64,
-        biometric_sid: i64,
+        authenticator_sids: (i64, i64),
+        patchlevels: Option<crate::RequestPatchLevels>,
     ) -> Result<KeyCreationResult, Error> {
+        let (password_sid, biometric_sid) = authenticator_sids;
         // Decrypt the wrapping key blob
-        let (wrapping_key, _) = self.keyblob_parse_decrypt(wrapping_key_blob, unwrapping_params)?;
+        let (wrapping_key, wrapping_slot) = self.keyblob_parse_decrypt_with_patchlevels(
+            wrapping_key_blob,
+            unwrapping_params,
+            patchlevels,
+        )?;
         let keyblob::PlaintextKeyBlob {
             characteristics,
             key_material,
         } = wrapping_key;
+        let single_use_wrapping_key = get_opt_tag_value!(
+            tag::characteristics_at(&characteristics, self.hw_info.security_level)?,
+            UsageCountLimit
+        )? == Some(&1);
 
         // Decode the ASN.1 DER encoded `SecureKeyWrapper`.
         let mut secure_key_wrapper = SecureKeyWrapper::from_der(wrapped_key_data)
@@ -766,7 +808,7 @@ impl crate::KeyMintTa {
         imported_key_params.try_push(KeyParam::CertificateNotBefore(UNDEFINED_NOT_BEFORE))?;
         imported_key_params.try_push(KeyParam::CertificateNotAfter(UNDEFINED_NOT_AFTER))?;
 
-        self.import_key(
+        let imported = self.import_key_with_patchlevels(
             imported_key_params,
             KeyFormat::try_from(secure_key_wrapper.key_description.key_format).map_err(|_e| {
                 km_err!(
@@ -778,13 +820,28 @@ impl crate::KeyMintTa {
             &imported_key_data,
             None,
             KeyImport::Wrapped,
-        )
+            patchlevels,
+        )?;
+        if single_use_wrapping_key {
+            if let (Some(slot), Some(sdd_mgr)) = (wrapping_slot, &mut self.dev.sdd_mgr) {
+                if let Err(error) = sdd_mgr.delete_secret(slot) {
+                    // Do not publish an import when its successful unwrap use
+                    // cannot be consumed. The fresh destination remains ours.
+                    if let Err(cleanup_error) = self.delete_key(&imported.key_blob) {
+                        warn!("failed to delete unpublished wrapped-import key: {cleanup_error:?}");
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(imported)
     }
 
-    pub(crate) fn upgrade_key(
+    pub(crate) fn upgrade_key_with_patchlevels(
         &mut self,
         keyblob_to_upgrade: &[u8],
         upgrade_params: Vec<KeyParam>,
+        patchlevels: Option<crate::RequestPatchLevels>,
     ) -> Result<Vec<u8>, Error> {
         let (mut keyblob, mut modified) =
             match self.keyblob_parse_decrypt_backlevel(keyblob_to_upgrade, &upgrade_params) {
@@ -859,22 +916,35 @@ impl crate::KeyMintTa {
                     }
                     KeyParam::OsPatchlevel(v) => {
                         if let Some(hal_info) = &self.hal_info {
-                            modified |= upgrade(v, hal_info.os_patchlevel, "OS patchlevel")?;
+                            modified |= upgrade(
+                                v,
+                                patchlevels.map_or(hal_info.os_patchlevel, |p| p.os_patchlevel),
+                                "OS patchlevel",
+                            )?;
                         } else {
                             error!("OS patchlevel not available, can't upgrade from {v}");
                         }
                     }
                     KeyParam::VendorPatchlevel(v) => {
                         if let Some(hal_info) = &self.hal_info {
-                            modified |=
-                                upgrade(v, hal_info.vendor_patchlevel, "vendor patchlevel")?;
+                            modified |= upgrade(
+                                v,
+                                patchlevels
+                                    .map_or(hal_info.vendor_patchlevel, |p| p.vendor_patchlevel),
+                                "vendor patchlevel",
+                            )?;
                         } else {
                             error!("vendor patchlevel not available, can't upgrade from {v}");
                         }
                     }
                     KeyParam::BootPatchlevel(v) => {
                         if let Some(boot_info) = &self.boot_info {
-                            modified |= upgrade(v, boot_info.boot_patchlevel, "boot patchlevel")?;
+                            modified |= upgrade(
+                                v,
+                                patchlevels
+                                    .map_or(boot_info.boot_patchlevel, |p| p.boot_patchlevel),
+                                "boot patchlevel",
+                            )?;
                         } else {
                             error!("boot patchlevel not available, can't upgrade from {v}");
                         }

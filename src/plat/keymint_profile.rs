@@ -180,6 +180,21 @@ fn probe_system_keymint_hardware_info(
     Ok(info)
 }
 
+/// Read the actual AIDL HAL without synthesizing a property-based profile.
+/// A missing optional service is distinct from a registered but faulty HAL.
+pub(crate) fn diagnose_system_keymint(
+    security_level: SecurityLevel,
+) -> Result<Option<KeyMintHardwareInfo>> {
+    let service = system_keymint_service_name(security_level)
+        .ok_or_else(|| anyhow!("unsupported security level for system KeyMint probe"))?;
+    if hub::try_get_service(service)?.is_none() {
+        return Ok(None);
+    }
+    let info = probe_system_keymint_hardware_info(security_level)?;
+    ensure_system_hardware_security_level(&info, security_level)?;
+    Ok(Some(info))
+}
+
 fn profile_from_system_hardware_info(
     info: &KeyMintHardwareInfo,
     security_level: SecurityLevel,

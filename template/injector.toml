@@ -1,5 +1,6 @@
-# With `[filter].enabled = true`, a UID is intercepted when any package
-# sharing that UID is listed in `scoop`.
+# With `[filter].enabled = true`, caller UID and resolved packages select OMK.
+# Targets: package (all users), package@user_id, or uid:full_android_uid.
+# Matching one shared-UID package selects the entire UID.
 # Filter deny settings still apply to every package resolved for the UID.
 
 version = 1

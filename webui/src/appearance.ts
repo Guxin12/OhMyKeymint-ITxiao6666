@@ -107,6 +107,12 @@ function parseSystemColors(output: string): Partial<Record<ResolvedMode, string>
   return result
 }
 
+function supportsBackdropBlur(): boolean {
+  if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false
+  return CSS.supports('backdrop-filter', 'blur(1px)')
+    || CSS.supports('-webkit-backdrop-filter', 'blur(1px)')
+}
+
 // Adapted from MIUIX MonetMapping.kt (Apache-2.0). MIUIX secondary is an
 // inactive control fill (outlineVariant), not the Material secondary accent.
 function monetTokens(seed: string, dark: boolean, style: PaletteStyle, spec: ColorSpec): Record<string, string> {
@@ -217,7 +223,6 @@ export class AppearanceController {
     if (stored.options.monet === undefined && normalizeAccent(stored.accent) !== null) {
       this.#options.monet = stored.accent === DEFAULT_ACCENT || stored.accent === 'system'
     }
-    if (this.#options.liquidGlass) this.#options.floatingBottomBar = true
     this.#systemTheme.addEventListener('change', () => {
       this.#apply()
       this.#emit()
@@ -357,14 +362,8 @@ export class AppearanceController {
   }
 
   setOption(option: AppearanceOption, enabled: boolean): void {
-    const floatingChanged = option === 'liquidGlass' && enabled
-      && !this.#options.floatingBottomBar
-    const glassChanged = option === 'floatingBottomBar' && !enabled
-      && this.#options.liquidGlass
-    if (this.#options[option] === enabled && !floatingChanged && !glassChanged) return
+    if (this.#options[option] === enabled) return
     this.#options[option] = enabled
-    if (floatingChanged) this.#options.floatingBottomBar = true
-    if (glassChanged) this.#options.liquidGlass = false
     this.#storeAppearance()
     this.#syncUrl()
     this.#apply()
@@ -457,6 +456,10 @@ export class AppearanceController {
     root.dataset.barBlur = String(this.#options.barBlur)
     root.dataset.floatingBottomBar = String(this.#options.floatingBottomBar)
     root.dataset.liquidGlass = String(this.#options.liquidGlass)
+    // KernelSU disables its RenderEffect blur when the platform cannot
+    // provide it. Keep the same explicit capability state for the WebView
+    // fallback instead of painting a solid bar that looks like blur.
+    root.dataset.backdropBlurSupported = String(supportsBackdropBlur())
     root.dataset.paletteStyle = this.#paletteStyle
     root.dataset.colorSpec = this.#colorSpec
     root.style.setProperty('--omk-ui-scale', String(this.#interfaceScale / 100))

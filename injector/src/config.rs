@@ -1,4 +1,4 @@
-use kmr_common::consts::{KEYSTORE_GID, KEYSTORE_UID};
+use kmr_common::consts::{AID_USER_OFFSET, KEYSTORE_GID, KEYSTORE_UID};
 use kmr_common::runtime::{
     file_watch::{self, WatchTrigger},
     fs::atomic_replace_preserving_metadata,
@@ -371,9 +371,9 @@ fn replace_scoop_at_path(path: &Path, packages: Vec<String>) -> Result<(), Strin
     let packages = normalize_packages(packages);
     if let Some(package) = packages
         .iter()
-        .find(|package| !is_valid_exact_package_name(package))
+        .find(|package| parse_scoop_target(package).is_none())
     {
-        return Err(format!("invalid exact package name in scoop: {package}"));
+        return Err(format!("invalid caller target in scoop: {package}"));
     }
     config.scoop = packages;
     let rendered = render_config(&config)
@@ -395,6 +395,35 @@ fn is_valid_exact_package_name(value: &str) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScoopTarget<'a> {
+    Package(&'a str),
+    PackageUser(&'a str, u32),
+    Uid(u32),
+}
+
+pub(crate) fn parse_scoop_target(value: &str) -> Option<ScoopTarget<'_>> {
+    fn decimal(value: &str) -> Option<u32> {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        value.parse().ok()
+    }
+
+    if let Some(uid) = value.strip_prefix("uid:") {
+        return decimal(uid).map(ScoopTarget::Uid);
+    }
+    if let Some((package, user)) = value.split_once('@') {
+        if !is_valid_exact_package_name(package) {
+            return None;
+        }
+        let user = decimal(user)?;
+        return (user <= u32::MAX / AID_USER_OFFSET)
+            .then_some(ScoopTarget::PackageUser(package, user));
+    }
+    is_valid_exact_package_name(value).then_some(ScoopTarget::Package(value))
+}
+
 fn default_owner(path: &Path) -> (u32, u32) {
     if path == Path::new(DEFAULT_CONFIG_PATH) {
         (KEYSTORE_UID, KEYSTORE_GID)
@@ -405,13 +434,14 @@ fn default_owner(path: &Path) -> (u32, u32) {
 
 fn render_config(config: &InjectorConfig) -> io::Result<String> {
     let mut contents = String::from(
-        "# With `[filter].enabled = true`, a UID is intercepted when any package\n\
-         # sharing that UID is listed in `scoop`.\n\
+        "# With `[filter].enabled = true`, caller UID and resolved packages select OMK.\n\
+         # Targets: package (all users), package@user_id, or uid:full_android_uid.\n\
+         # Matching one shared-UID package selects the entire UID.\n\
          # Filter deny settings still apply to every package resolved for the UID.\n\n",
     );
     contents.push_str(&format!("version = {}\n\n", config.version));
     contents.push_str(
-        "# Add one exact package name per line. Blank lines and lines whose first non-space character is # are ignored.\n",
+        "# Add one caller target per line. Blank lines and lines whose first non-space character is # are ignored.\n",
     );
     // Keep the package list easy to edit: bare one-package-per-line entries
     // are accepted by preprocess_config and intentionally omit TOML punctuation.
@@ -505,7 +535,15 @@ fn parse_versioned_config(
     if parsed.main.operation_start_delay_ms > 250 {
         return Err("main.operation_start_delay_ms must be in 0..=250".into());
     }
-    Ok((parsed.normalized(), migrated))
+    let parsed = parsed.normalized();
+    if let Some(target) = parsed
+        .scoop
+        .iter()
+        .find(|target| parse_scoop_target(target).is_none())
+    {
+        return Err(format!("invalid caller target in scoop: {target}"));
+    }
+    Ok((parsed, migrated))
 }
 
 fn insert_config_version(contents: &str, bom_len: usize) -> String {
@@ -792,8 +830,16 @@ fn normalize_packages(packages: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::new();
     for package in packages {
         let package = package.trim();
-        if !package.is_empty() && seen.insert(package.to_string()) {
-            normalized.push(package.to_string());
+        if package.is_empty() {
+            continue;
+        }
+        let package = match parse_scoop_target(package) {
+            Some(ScoopTarget::PackageUser(package, user)) => format!("{package}@{user}"),
+            Some(ScoopTarget::Uid(uid)) => format!("uid:{uid}"),
+            _ => package.to_string(),
+        };
+        if seen.insert(package.clone()) {
+            normalized.push(package);
         }
     }
     normalized

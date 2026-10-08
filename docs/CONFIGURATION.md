@@ -59,10 +59,66 @@ an already-open operation with the new route. If a process restart is needed
 for a clean boundary, restart the injector only. An injector-only setting
 change does not require a keymint restart.
 
+## Limited-use keys
+
+Keystore-enforced limited-use keys reserve one remaining use for each active
+operation. New operations cannot exceed the current durable count. Successful
+finish commits the count before returning output; abort, pruning, terminal
+backend errors, and dropped operations release their reservation without
+consuming a use. Reservations stay in memory and are independent of runtime
+configuration reloads. Rebinding an alias creates a separate key entry and
+does not transfer reservations from the old entry.
+
+Wrapped-key imports reserve a Keystore-enforced use of the wrapping key until
+the destination key is saved. The durable decrement and destination alias
+publication share one database transaction. A failed import or save leaves the
+remaining count and previous aliases intact. Successful final consumption
+removes the wrapping key; replacing that same alias publishes the imported key
+atomically. TA-enforced single-use wrapping keys consume their secure-deletion
+slot after a successful unwrap import. Failed unwraps retain that slot. The TA
+consumption precedes database publication, so a later database failure does not
+restore a TA-enforced use.
+
+Key generation and imports delete unpublished TA key blobs on a best-effort
+basis when storage or publication fails. Cleanup failure does not replace the
+original operation error.
+
+## App patch-level profiles
+
+Optional `config.toml` profiles set the patch levels reported and bound into
+keys generated or imported by selected applications:
+
+```toml
+[app_patch_levels."com.example.app@0"]
+os_patchlevel = "2026-04-05"
+vendor_patchlevel = "2026-04-05"
+boot_patchlevel = "2026-04-05"
+```
+
+A bare package target applies to every Android user; `package@user_id` applies
+to one user and takes precedence over the bare target for that package. Each
+field may be omitted or set to `"auto"` to inherit the current global value.
+OS and vendor fields accept exact calendar dates in `YYYY-MM-DD` form that
+are not in the future. The boot field also accepts a decimal `u32` wire value.
+An explicit empty profile inherits all global fields and takes precedence over
+a bare profile. Invalid targets, fields, or values reject the complete candidate.
+
+The current caller's packages select the profile without consulting a key,
+alias, or keyblob's origin. Native service UIDs use the global patch levels
+without an application package lookup. Packages sharing one UID also share the selected
+profile; conflicting effective profiles among matched packages return
+`INVALID_ARGUMENT`. The profile controls generated/imported key
+characteristics, the signed attestation extension, keyblob validation, and
+upgrade. It does not change which backend handles a request. The TA's global
+HAL and boot state remain unchanged. Each operation retains the profile
+selected at begin, including after a configuration reload; new requests use
+the new configuration. Changing a profile follows the normal OMK keyblob
+validation and upgrade rules for existing keys.
+
 ## Embedded WebUI
 
 The module includes a WebUI for selecting packages in `scoop`, installing a
-local keybox, managing the Android security patch level, applying a Pixel
+local keybox, managing global and per-application Android security patch levels, applying a Pixel
 PIF fingerprint through OMK's own Zygisk payload, and independently enabling
 Tencent Soter compatibility (Beta). Open it from the Oh My Keymint module page in
 KernelSU. With Magisk, open an installed KSUWebUIStandalone or WebUI X host and
@@ -93,7 +149,8 @@ palette when none are available. No wallpaper data or new persistent cache is cr
 Turning Monet off restores the static MIUIX light/dark palette while remembering
 the selected accent for the next time Monet is enabled. Bar blur, floating
 navigation, and liquid glass are optional and remain disabled until selected;
-liquid glass uses the floating navigation layout automatically.
+each option is independent; liquid glass only affects the floating navigation
+surface and does not enable floating navigation by itself.
 The bottom navigation stays anchored above the host's bottom safe area while
 pages switch and restore their own scroll positions. Interface scaling changes
 the bar's size without scaling the host's safe-area spacing. Top and side
@@ -155,17 +212,26 @@ does not prove that Play Integrity will accept the Keybox. When a refresh is
 due, an unavailable endpoint falls back to the last validated cache and then
 the bundled snapshot.
 
-The Home page also keeps the 30 most recent successful WebUI changes in
-`/data/misc/keystore/omk/data/webui_activity.json`. The list covers saved app
-targets, Keybox changes, security-patch synchronization
-and restore, and PIF enable or disable actions. It stores only the action type,
-a short non-secret result such as an entry count, patch date, or Pixel model,
-and the completion time. It never stores package-name lists, Keybox contents or
-filenames, downloaded response bodies, or a PIF
-fingerprint. The Home page initially shows the newest four entries, can expand
-the complete retained list, and provides controls to copy an entry or clear the
-activity file. Activity recording is supplementary: failure to update this file
-does not change the result of a completed WebUI operation.
+The WebUI does not display or clear a recent-activity history. Existing activity
+files from older installations are ignored by the current interface.
+
+The Home page exposes read-only runtime diagnostics for OMK KeyMint, keystore2,
+the injector, Soter, the registered TEE and StrongBox KeyMint HALs, and the matching
+`default` and `strongbox` RKP Binder services. A missing
+optional StrongBox service is shown as unregistered. These checks do not issue
+an attestation challenge, contact an RKP provisioning server, or certify
+hardware-backed operation. A vendor KeyMint process is not used as evidence
+that OMK itself is running. The Keybox inspector shows public
+certificate-chain metadata (algorithm and chain length) and each certificate's
+subject, validity dates, and serial number without exposing private
+keys or relay credentials. The expandable chain view presents the root first,
+uses the current interface language for date formatting, and keeps dates in
+UTC. A diagnostic read failure is reported in the UI and does not change runtime
+routing.
+
+The injector daemon waits for keystore2 to appear and retries injection after
+startup or a process restart. If keystore2 disappears before launcher discovery,
+the launcher returns a retryable failure to the existing daemon loop.
 
 The WebUI can read and replace the `scoop` package list and can install a local
 keybox selected through Android's system document picker. The picker can use
@@ -271,36 +337,39 @@ starting the daemon. Read failures are reported to the WebUI, and the payload
 does not enable the experiment when configuration cannot be validated. Tencent
 Soter Beta and Qualcomm Soter HAL are mutually exclusive; enabling either one
 is rejected while the other is enabled, so disable the active service first.
+Install and enable Zygisk Next separately. Restart the device after enabling or
+disabling Tencent Soter Beta; the compatibility experiment is not verified.
 
 **Soter HAL** is a separate Qualcomm integration for
-`vendor.qti.hardware.soter.ISoter/default`. Its WebUI panel exposes only an
-enable switch and the Cancel and Save actions. Server URL, B-device ID, token,
-UID mapping, and the self-signed-TLS option are not shown. Built-in relay defaults
-fill each missing URL, B-device ID, or token field, including when no
-configuration has been saved. Existing nonempty custom relay values are
-preserved. Enabled configurations with missing fields are also resolved by the
-native relay when read.
-The switch is disabled by default, TLS certificate
-validation remains enabled, and the default UID map is empty. Toggling the
-switch changes only the enabled state and preserves the other configuration
-fields. Opening or cancelling the panel does not write configuration. The
-Qualcomm service cannot be enabled while Tencent Soter Beta is enabled.
+`vendor.qti.hardware.soter.ISoter/default`. Its WebUI panel exposes one switch
+for enabling the remote Soter relay; that switch also takes over the vendor HAL
+with the local software TA. The panel also exposes editable relay URL, B device
+ID, token, and optional UID mapping fields, plus a switch to accept self-signed
+TLS certificates. Existing nonempty relay identity values are preserved; empty
+URL, B device ID, or token fields are filled with their built-in defaults when
+saved. The relay switch is disabled by default, TLS certificate validation
+remains enabled unless explicitly disabled, and the default UID map is empty.
+Opening or cancelling the panel does not write configuration. The Qualcomm
+service cannot be enabled while Tencent Soter Beta is enabled.
 
-Saving atomically writes
-`/data/misc/keystore/omk/data/soterta/remote.conf` with mode `0600`. Built-in
-credentials are part of the module and are not secret storage; hiding the
-fields in the WebUI does not make them confidential. Custom saved configuration
-is device-local. When disabled, the software TA uses its local ledger; when
-enabled, supported operations use the configured relay. Relay failures return
-the stock dead-TA reply and never fall back to the local ledger. The service is
-independent of KeyMint routing, and saved settings survive reboot.
+Saving atomically writes the relay fields to
+`/data/misc/keystore/omk/data/soterta/remote.conf` with mode `0600`, using the
+`remote_enabled=` key. The native takeover flag in
+`/data/misc/keystore/omk/data/soterta/enabled` is kept in sync with that single
+switch. Built-in credentials are part of the module and are not secret storage;
+custom saved configuration is device-local. When enabled, supported operations
+use the configured relay;
+relay failures return the stock dead-TA reply and never fall back to local
+material. When disabled, the stock HAL is restored. The service is independent
+of KeyMint routing, and saved settings
+survive reboot. Saving through the native bridge also asks the installed
+`soterta.sh` watchdog to converge immediately; its normal service loop continues
+to publish takeover status in `status.json`.
 The WebUI sends configuration as one bounded Base64-encoded UTF-8 JSON argument
 to `--webui-set-soter-hal-base64`, then reads `--webui-get-soter-hal` and checks
 every field before reporting a successful save. The raw JSON command
 `--webui-set-soter-hal` remains available for correctly quoted direct CLI calls.
 
-The user must install and enable Zygisk Next separately and reboot after
-enabling or disabling this option. The module does not restart Soter itself.
 The existing Zygisk entry point selects only the exact
 `com.tencent.soter.soterserver` process. A supplied nonempty app data directory
 must belong to that package; loaders which omit it are supported. The separate
@@ -344,10 +413,10 @@ All other WebUI assets are bundled and no network request is made for normal
 local operations. None of the WebUI network paths requires a device-provided
 `curl` or `wget`.
 
-The WebUI does not parse or rewrite `injector.toml` itself. It sends the package
-list to the native `inject` helper. The helper first parses the current complete
-file, normalizes duplicate and surrounding whitespace, rejects invalid package
-names and TrickyStore-style `!` or `?` suffixes, then renders and atomically
+The WebUI does not parse or rewrite `injector.toml` itself. It sends caller
+targets to the native `inject` helper. The helper first parses the current complete
+file, normalizes duplicates, surrounding whitespace, and decimal identifiers,
+rejects invalid targets and TrickyStore-style `!` or `?` suffixes, then renders and atomically
 replaces the complete file while preserving its ownership and mode. A read,
 parse, validation, or write failure is returned to the WebUI and leaves the
 existing file unchanged. Saving remains disabled when the current list could
@@ -479,6 +548,16 @@ suppresses normal logging.
 
 Changing this field requires a keymint restart. An unrecognized value falls
 back to `debug`, but relying on that fallback can hide a spelling mistake.
+
+Keymint and injector apply the same per-process burst limits before writing
+to logcat, the console, and their rotating files. Each source location can
+write four warning records per 30 seconds and 32 debug or trace records per
+second. A structured `event=log_rate_limit` record reports the number suppressed
+when that source is used again after the window, or when logs are flushed.
+Error and info records are not rate limited. The in-memory limiter keeps only
+bounded source metadata and counters; it does not retain message payloads.
+AAID diagnostics contain the caller UID and package/signature counts, without
+package names, signing-certificate bytes, challenges, tokens, or key material.
 
 #### `force_skip_system_biometric_hat_verification`
 
@@ -916,18 +995,29 @@ add names that are not described in this guide.
 
 #### `scoop`
 
-This array contains exact Android package names that may use OMK. Keep the
-surrounding `scoop = [` and `]` lines and add one bare package name per line,
+This array selects current Android callers that may use OMK. Supported targets
+are an exact package name for every Android user, `package@user_id` for one
+Android user, and `uid:full_android_uid` for one complete caller UID. For
+example, `com.example.app@10` selects that package in user 10, while
+`uid:1010123` selects UID 1010123, not UID 10123 in user 0. User IDs are decimal
+integers in `0..=42949`; full UIDs are in `0..=4294967295`. UID targets still
+require normal package resolution unless `allow_unknown_package` permits an
+unresolved caller; they do not override safety or deny settings.
+
+Keep the surrounding `scoop = [` and `]` lines and add one target per line,
 matching the line-oriented package list used by TrickyStore. Bare entries omit
 both quotes and commas. Empty lines and lines whose first non-space character
 is `#` are ignored, and surrounding spaces are trimmed. The traditional
 quoted, comma-separated TOML array form is also accepted. Empty entries are
-removed and duplicate entries are reduced to one when the file is loaded. App
+removed and decimal identifiers are canonicalized before duplicate entries are
+reduced to one when the file is loaded. A bare package and a user-specific
+target may coexist. App
 labels, partial names, and wildcards are not accepted. TrickyStore's `!`
-generate suffix is not interpreted; enter the exact package name only.
+generate suffix is not interpreted. Invalid selectors reject the configuration;
+a failed reload keeps the previous valid settings active.
 
-The embedded WebUI presents installed package names and saves the selected
-ones through the native helper described above. A WebUI save replaces only the
+The embedded WebUI presents installed packages with their Android user and
+saves user-specific selections through the native helper described above. A WebUI save replaces only the
 normalized `scoop` list; `[main]`, `[filter]`, `[intercept]`, and preserved
 per-package tables retain their current values. Opening the package selector,
 returning to it from another app, or using its refresh action reloads installed
@@ -967,6 +1057,9 @@ recommended. `"debug"` is the default and the normal choice for a bug report.
 A valid file change updates the level without restarting the injector. An
 unrecognized string does not make the TOML file invalid; the injector uses
 `debug` instead.
+
+The shared logging burst policy above also applies to injector logcat and
+file output. Changing the log level does not reset the current burst counters.
 
 #### `attestation_generation_delay_ms`
 
@@ -1022,7 +1115,7 @@ With the filter enabled, OMK evaluates a caller in this order:
    `block_android_package = true`.
 2. If its package names cannot be resolved, follow `allow_unknown_package`.
 3. Reject the whole identity if any resolved package is in `deny_packages`.
-4. Reject it if none of its resolved packages is in `scoop`.
+4. Reject it if no `scoop` target matches its current UID, package, and Android user.
 5. Otherwise allow it to use the enabled `[intercept]` routes.
 
 This order matters for packages that share an Android identity: a deny rule
@@ -1191,8 +1284,8 @@ until the file is corrected.
 The embedded WebUI can change `scoop`, install a locally selected keybox,
 synchronize the four `[trust]` patch-level fields from the official Android
 Security Bulletin, restore those fields to `"auto"`, manage the validated PIF
-profile, and configure the independent Qualcomm Soter
-HAL relay used by the WeChat payment fingerprint path. Security-patch sync and restore also manage
+profile, and configure the Qualcomm Soter HAL relay used by the WeChat payment
+fingerprint path. Security-patch sync and restore also manage
 the two global runtime properties and the defaults snapshot described above.
 Persistent native save paths validate the complete candidate before writing and
 use atomic replacement. Successful saves enter the applicable watcher hot-reload

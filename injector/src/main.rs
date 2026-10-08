@@ -191,7 +191,13 @@ fn main() {
         }
     }
 
-    let (pid, target_path) = utils::find_process_by_name("keystore2").unwrap();
+    let (pid, target_path) = match utils::find_process_by_name("keystore2") {
+        Ok(target) => target,
+        Err(error) => {
+            warn!("event=target_not_ready process=keystore2 error={error:#}; daemon will retry");
+            std::process::exit(1);
+        }
+    };
     match utils::executable_identity(&target_path) {
         Ok(identity) => info!(
             "keystore2 target pid={} exe={} sha256={} elf={}",

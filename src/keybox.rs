@@ -145,6 +145,41 @@ pub struct KeyboxMetadata {
     pub level: KeyboxLevel,
 }
 
+/// Public, non-sensitive certificate information used by the WebUI inspector.
+///
+/// Private key material is deliberately excluded.  The inspector only reads
+/// the presented certificate chains and is therefore safe to expose as a
+/// diagnostic view even when the active Keybox is invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KeyboxInspector {
+    pub rsa: Option<KeyboxChainInspector>,
+    pub ec: Option<KeyboxChainInspector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboxChainInspector {
+    pub algorithm: &'static str,
+    pub chain_length: usize,
+    pub serials: Vec<String>,
+    pub leaf_subject: String,
+    pub leaf_issuer: String,
+    pub valid_from: String,
+    pub valid_until: String,
+    /// Public metadata for every certificate in presentation order.  Keeping
+    /// the complete chain here lets the WebUI show the same per-certificate
+    /// details as a key-attestation inspector without exposing DER or keys.
+    pub certificates: Vec<KeyboxCertificateInspector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboxCertificateInspector {
+    pub serial: String,
+    pub subject: String,
+    pub issuer: String,
+    pub valid_from: String,
+    pub valid_until: String,
+}
+
 const BUNDLED_KEYBOX_XML: &str = include_str!("../template/keybox.xml");
 
 lazy_static::lazy_static! {
@@ -388,6 +423,22 @@ impl KeyBox {
         )
     }
 
+    /// Return certificate-only details for the optional RSA and EC chains.
+    /// Parsing errors are represented as an empty diagnostic entry by the
+    /// caller; they never affect KeyMint startup or key generation.
+    pub fn inspector(&self) -> KeyboxInspector {
+        KeyboxInspector {
+            rsa: self
+                .rsa_info
+                .as_ref()
+                .and_then(|info| inspector_for_chain("RSA", &info.chain)),
+            ec: self
+                .ec_info
+                .as_ref()
+                .and_then(|info| inspector_for_chain("EC", &info.chain)),
+        }
+    }
+
     fn certificate_serials(&self) -> Result<Vec<String>> {
         let mut serials = BTreeSet::new();
         for info in [self.ec_info.as_ref(), self.rsa_info.as_ref()]
@@ -535,6 +586,40 @@ fn canonical_certificate_serial(encoded_certificate: &[u8]) -> Result<String> {
         return Ok("0".to_string());
     }
     Ok(hex::encode(significant))
+}
+
+fn inspector_for_chain(
+    algorithm: &'static str,
+    chain: &[keymint::Certificate],
+) -> Option<KeyboxChainInspector> {
+    let certificates = chain
+        .iter()
+        .map(|certificate| {
+            let (_, parsed) = parse_x509_certificate(&certificate.encoded_certificate).ok()?;
+            Some(KeyboxCertificateInspector {
+                serial: canonical_certificate_serial(&certificate.encoded_certificate).ok()?,
+                subject: parsed.subject().to_string(),
+                issuer: parsed.issuer().to_string(),
+                valid_from: parsed.validity().not_before.to_rfc2822().ok()?,
+                valid_until: parsed.validity().not_after.to_rfc2822().ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let leaf = certificates.first()?;
+    let serials = certificates
+        .iter()
+        .map(|certificate| certificate.serial.clone())
+        .collect();
+    Some(KeyboxChainInspector {
+        algorithm,
+        chain_length: chain.len(),
+        serials,
+        leaf_subject: leaf.subject.clone(),
+        leaf_issuer: leaf.issuer.clone(),
+        valid_from: leaf.valid_from.clone(),
+        valid_until: leaf.valid_until.clone(),
+        certificates,
+    })
 }
 
 fn combine_chain_metadata(chains: impl IntoIterator<Item = ChainMetadata>) -> KeyboxMetadata {
@@ -945,6 +1030,30 @@ pub fn installed_keybox_state_and_metadata(
     let metadata = keybox.metadata();
     let serials = keybox.certificate_serials().ok();
     Ok((state, metadata, serials))
+}
+
+/// Read certificate-only details from the installed keybox without changing
+/// the active KeyMint state or rewriting an invalid file.  This is used by the
+/// read-only WebUI inspector, so malformed input is represented as an invalid
+/// result rather than being repaired as a side effect of a diagnostic query.
+pub fn installed_keybox_inspector() -> Result<(KeyboxFileState, KeyboxInspector)> {
+    let contents = fs::read(KEYBOX_PATH)
+        .with_context(|| format!("failed to read keybox.xml from {KEYBOX_PATH}"))?;
+    if contents.len() > MAX_KEYBOX_XML_BYTES {
+        return Ok((KeyboxFileState::Invalid, KeyboxInspector::default()));
+    }
+    let Ok(xml) = str::from_utf8(&contents) else {
+        return Ok((KeyboxFileState::Invalid, KeyboxInspector::default()));
+    };
+    let Ok(keybox) = KeyBox::from_xml_str(xml) else {
+        return Ok((KeyboxFileState::Invalid, KeyboxInspector::default()));
+    };
+    let state = if is_bundled_keybox_xml(xml) {
+        KeyboxFileState::Bundled
+    } else {
+        KeyboxFileState::Custom
+    };
+    Ok((state, keybox.inspector()))
 }
 
 /// Ensure a validated copy of Google's status list exists in the persistent
@@ -1555,6 +1664,71 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(keybox.certificate_serials().unwrap(), expected);
+    }
+
+    #[test]
+    fn inspector_preserves_each_certificate_metadata_and_chain_order() {
+        let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        for (algorithm, info) in [
+            ("RSA", keybox.rsa_info.as_ref().unwrap()),
+            ("EC", keybox.ec_info.as_ref().unwrap()),
+        ] {
+            let inspected = inspector_for_chain(algorithm, &info.chain).unwrap();
+            assert_eq!(inspected.algorithm, algorithm);
+            assert_eq!(inspected.chain_length, info.chain.len());
+            assert_eq!(inspected.certificates.len(), info.chain.len());
+            assert_eq!(
+                inspected.serials,
+                info.chain
+                    .iter()
+                    .map(|certificate| {
+                        canonical_certificate_serial(&certificate.encoded_certificate).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            );
+
+            for (certificate, actual) in info.chain.iter().zip(inspected.certificates.iter()) {
+                let (_, parsed) = parse_x509_certificate(&certificate.encoded_certificate).unwrap();
+                assert_eq!(
+                    actual.serial,
+                    canonical_certificate_serial(&certificate.encoded_certificate).unwrap()
+                );
+                assert_eq!(actual.subject, parsed.subject().to_string());
+                assert_eq!(actual.issuer, parsed.issuer().to_string());
+                assert_eq!(
+                    actual.valid_from,
+                    parsed.validity().not_before.to_rfc2822().unwrap()
+                );
+                assert_eq!(
+                    actual.valid_until,
+                    parsed.validity().not_after.to_rfc2822().unwrap()
+                );
+            }
+            let leaf = &inspected.certificates[0];
+            assert_eq!(inspected.leaf_subject, leaf.subject);
+            assert_eq!(inspected.leaf_issuer, leaf.issuer);
+            assert_eq!(inspected.valid_from, leaf.valid_from);
+            assert_eq!(inspected.valid_until, leaf.valid_until);
+        }
+    }
+
+    #[test]
+    fn inspector_rejects_a_chain_with_any_malformed_certificate() {
+        let keybox = KeyBox::from_xml_str(BUNDLED_KEYBOX_XML).unwrap();
+        for (algorithm, info) in [
+            ("RSA", keybox.rsa_info.as_ref().unwrap()),
+            ("EC", keybox.ec_info.as_ref().unwrap()),
+        ] {
+            for index in 0..info.chain.len() {
+                let mut chain = info.chain.clone();
+                chain[index].encoded_certificate = vec![0xff, 0x00];
+
+                // A malformed leaf or root must invalidate the entire view,
+                // rather than leave the UI displaying a partial chain.
+                assert!(inspector_for_chain(algorithm, &chain).is_none());
+            }
+        }
+        assert!(inspector_for_chain("RSA", &[]).is_none());
     }
 
     #[test]
@@ -2330,11 +2504,15 @@ w1IdYIg2Wxg7yHcQZemFQg==
         signer: KeyAlgorithm,
     ) {
         use crate::keymaster::keymint_device::tests::{set_boot_info, test_ta};
+        use crate::plat::attestation::{
+            ensure_sequence, parse_tlv, TlvClass, ANDROID_ATTESTATION_OID,
+        };
         use kmr_wire::{
             keymint::{Algorithm, DateTime, Digest, EcCurve, KeyParam, KeyPurpose, PaddingMode},
             GenerateKeyRequest, KeySizeInBits, PerformOpReq, PerformOpRsp, RsaExponent,
             SetHalInfoRequest,
         };
+        use x509_der::Decode;
 
         struct TestSigningInfo(KeyBox);
         impl RetrieveCertSigningInfo for TestSigningInfo {
@@ -2366,72 +2544,139 @@ w1IdYIg2Wxg7yHcQZemFQg==
         );
         ta.set_sign_info(Some(Box::new(TestSigningInfo(keybox))));
 
-        for algorithm in [Algorithm::Rsa, Algorithm::Ec] {
-            let mut key_params = vec![
-                KeyParam::Algorithm(algorithm),
-                KeyParam::Purpose(KeyPurpose::Sign),
-                KeyParam::Digest(Digest::Sha256),
-                KeyParam::NoAuthRequired,
-                KeyParam::AttestationChallenge(b"single-algorithm-keybox".to_vec()),
-                KeyParam::AttestationApplicationId(b"test".to_vec()),
-                KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
-                KeyParam::CertificateNotAfter(DateTime {
-                    ms_since_epoch: 2_000_000_000_000,
+        let attestation_oid = ANDROID_ATTESTATION_OID.to_string();
+        for (profile, expected_patchlevels) in [
+            (None, [202609, 20260901, 20250605]),
+            (
+                Some(kmr_ta::RequestPatchLevels {
+                    os_patchlevel: 202604,
+                    vendor_patchlevel: 20260405,
+                    boot_patchlevel: 20260405,
                 }),
-            ];
-            if algorithm == Algorithm::Rsa {
-                key_params.extend([
-                    KeyParam::KeySize(KeySizeInBits(2048)),
-                    KeyParam::RsaPublicExponent(RsaExponent(65537)),
-                    KeyParam::Padding(PaddingMode::RsaPkcs115Sign),
-                ]);
-            } else {
-                key_params.push(KeyParam::EcCurve(EcCurve::P256));
-            }
-            let response = ta.process_req(PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
-                key_params,
-                attestation_key: None,
-            }));
-            assert_eq!(response.error_code, 0, "{algorithm:?}: {response:?}");
-            let Some(PerformOpRsp::DeviceGenerateKey(response)) = response.rsp else {
-                panic!("unexpected generate response")
-            };
-            let chain = response.ret.certificate_chain;
-            assert_eq!(chain.len(), expected_chain.len() + 1);
-            assert_eq!(&chain[1..], &expected_chain);
-            let (_, leaf) = parse_x509_certificate(&chain[0].encoded_certificate).unwrap();
-            let (_, issuer) = parse_x509_certificate(&chain[1].encoded_certificate).unwrap();
-            assert_eq!(
-                leaf.signature_algorithm.algorithm.to_id_string(),
-                expected_signature_oid
-            );
-            assert_eq!(leaf.issuer(), issuer.subject());
-            match signer {
-                KeyAlgorithm::Rsa => {
-                    // The bundled RSA signer is 1024-bit; x509-parser's default
-                    // verifier requires 2048 bits. Verify this fixture explicitly
-                    // without changing production certificate-validation policy.
-                    ring::signature::UnparsedPublicKey::new(
-                        &ring::signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
-                        issuer.public_key().subject_public_key.data.as_ref(),
-                    )
-                    .verify(
-                        leaf.tbs_certificate.as_ref(),
-                        leaf.signature_value.data.as_ref(),
-                    )
-                    .unwrap();
-                }
-                KeyAlgorithm::Ec => leaf.verify_signature(Some(issuer.public_key())).unwrap(),
-            }
-            let subject_oid = leaf.public_key().algorithm.algorithm.to_id_string();
-            assert_eq!(
-                subject_oid,
+                [202604, 20260405, 20260405],
+            ),
+            (
+                Some(kmr_ta::RequestPatchLevels {
+                    os_patchlevel: 202605,
+                    vendor_patchlevel: 20260505,
+                    boot_patchlevel: 20260505,
+                }),
+                [202605, 20260505, 20260505],
+            ),
+            (None, [202609, 20260901, 20250605]),
+        ] {
+            for algorithm in [Algorithm::Rsa, Algorithm::Ec] {
+                let mut key_params = vec![
+                    KeyParam::Algorithm(algorithm),
+                    KeyParam::Purpose(KeyPurpose::Sign),
+                    KeyParam::Digest(Digest::Sha256),
+                    KeyParam::NoAuthRequired,
+                    KeyParam::AttestationChallenge(b"single-algorithm-keybox".to_vec()),
+                    KeyParam::AttestationApplicationId(b"test".to_vec()),
+                    KeyParam::CertificateNotBefore(DateTime { ms_since_epoch: 0 }),
+                    KeyParam::CertificateNotAfter(DateTime {
+                        ms_since_epoch: 2_000_000_000_000,
+                    }),
+                ];
                 if algorithm == Algorithm::Rsa {
-                    "1.2.840.113549.1.1.1"
+                    key_params.extend([
+                        KeyParam::KeySize(KeySizeInBits(2048)),
+                        KeyParam::RsaPublicExponent(RsaExponent(65537)),
+                        KeyParam::Padding(PaddingMode::RsaPkcs115Sign),
+                    ]);
                 } else {
-                    "1.2.840.10045.2.1"
+                    key_params.push(KeyParam::EcCurve(EcCurve::P256));
                 }
-            );
+                let response = ta.process_req_with_patchlevels(
+                    PerformOpReq::DeviceGenerateKey(GenerateKeyRequest {
+                        key_params,
+                        attestation_key: None,
+                    }),
+                    profile,
+                );
+                assert_eq!(
+                    response.error_code, 0,
+                    "{algorithm:?}, profile {profile:?}: {response:?}"
+                );
+                let Some(PerformOpRsp::DeviceGenerateKey(response)) = response.rsp else {
+                    panic!("unexpected generate response")
+                };
+                let chain = response.ret.certificate_chain;
+                assert_eq!(chain.len(), expected_chain.len() + 1);
+                assert_eq!(&chain[1..], &expected_chain);
+                let (_, leaf) = parse_x509_certificate(&chain[0].encoded_certificate).unwrap();
+                let (_, issuer) = parse_x509_certificate(&chain[1].encoded_certificate).unwrap();
+                assert_eq!(
+                    leaf.signature_algorithm.algorithm.to_id_string(),
+                    expected_signature_oid
+                );
+                assert_eq!(leaf.issuer(), issuer.subject());
+                match signer {
+                    KeyAlgorithm::Rsa => {
+                        // The bundled RSA signer is 1024-bit; x509-parser's default
+                        // verifier requires 2048 bits. Verify this fixture explicitly
+                        // without changing production certificate-validation policy.
+                        ring::signature::UnparsedPublicKey::new(
+                            &ring::signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
+                            issuer.public_key().subject_public_key.data.as_ref(),
+                        )
+                        .verify(
+                            leaf.tbs_certificate.as_ref(),
+                            leaf.signature_value.data.as_ref(),
+                        )
+                        .unwrap();
+                    }
+                    KeyAlgorithm::Ec => leaf.verify_signature(Some(issuer.public_key())).unwrap(),
+                }
+                let subject_oid = leaf.public_key().algorithm.algorithm.to_id_string();
+                assert_eq!(
+                    subject_oid,
+                    if algorithm == Algorithm::Rsa {
+                        "1.2.840.113549.1.1.1"
+                    } else {
+                        "1.2.840.10045.2.1"
+                    }
+                );
+
+                // Inspect the signed extension rather than the returned characteristics.
+                let extension = leaf
+                    .extensions()
+                    .iter()
+                    .find(|extension| extension.oid.to_id_string() == attestation_oid)
+                    .expect("Android attestation extension missing");
+                let (attestation, rest) = parse_tlv(extension.value).unwrap();
+                ensure_sequence(attestation, "attestation extension").unwrap();
+                assert!(rest.is_empty());
+                let mut fields = attestation.value;
+                for _ in 0..7 {
+                    let (_, next) = parse_tlv(fields).unwrap();
+                    fields = next;
+                }
+                let (hardware_enforced, rest) = parse_tlv(fields).unwrap();
+                ensure_sequence(hardware_enforced, "hardwareEnforced").unwrap();
+                assert!(rest.is_empty());
+                let mut authorizations = hardware_enforced.value;
+                let mut signed_patchlevels = [None; 3];
+                while !authorizations.is_empty() {
+                    let (field, rest) = parse_tlv(authorizations).unwrap();
+                    authorizations = rest;
+                    let index = match field.tag_number {
+                        706 => 0,
+                        718 => 1,
+                        719 => 2,
+                        _ => continue,
+                    };
+                    assert_eq!(field.class, TlvClass::ContextSpecific);
+                    assert!(field.constructed);
+                    let patchlevel = u32::from_der(field.value).unwrap();
+                    assert!(signed_patchlevels[index].replace(patchlevel).is_none());
+                }
+                assert_eq!(
+                    signed_patchlevels,
+                    expected_patchlevels.map(Some),
+                    "{algorithm:?}, profile {profile:?}"
+                );
+            }
         }
     }
 

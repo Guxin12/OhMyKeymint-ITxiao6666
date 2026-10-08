@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import {
   MiuixButton,
   MiuixDialog,
+  MiuixInput,
   MiuixProgressIndicator,
   MiuixSwitchPreference,
 } from 'miuix-vue'
@@ -20,7 +21,12 @@ const preview = isDev()
 const DEFAULT_RELAY_URL = 'http://110.40.170.96:10886'
 const DEFAULT_RELAY_DEVICE_ID = 'device-b-c3f204aa'
 const DEFAULT_RELAY_TOKEN = 'aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd'
-const enabled = ref(false)
+const remoteEnabled = ref(false)
+const url = ref('')
+const token = ref('')
+const deviceId = ref('')
+const tlsInsecure = ref(false)
+const uidMap = ref('')
 const soterBetaEnabled = ref(false)
 const saved = ref<SoterHalState | null>(null)
 const status = ref<'loading' | 'ready' | 'error'>('loading')
@@ -34,15 +40,17 @@ function tr(key: string, fallback: string): string {
 }
 
 const current = computed<SoterHalState | null>(() => {
-  const state = saved.value
-  if (!state) return null
+  if (!saved.value) return null
   return {
-    enabled: enabled.value,
-    url: state.url,
-    token: state.token,
-    device_id: state.device_id,
-    tls_insecure: state.tls_insecure,
-    uid_map: state.uid_map,
+    // The remote relay switch is the only user-facing Soter switch. Enabling
+    // it also asks the native bridge to take over the vendor HAL.
+    enabled: remoteEnabled.value,
+    remote_enabled: remoteEnabled.value,
+    url: url.value,
+    token: token.value,
+    device_id: deviceId.value,
+    tls_insecure: tlsInsecure.value,
+    uid_map: uidMap.value,
   }
 })
 
@@ -50,8 +58,8 @@ const canApply = computed(() => {
   if (preview || busy.value || status.value !== 'ready' || !saved.value) return false
   const state = current.value
   if (!state) return false
-  if (state.enabled && (!state.url.trim() || !state.token.trim() || !state.device_id.trim())) return false
-  if (state.enabled) {
+  if (state.remote_enabled && (!state.url.trim() || !state.token.trim() || !state.device_id.trim())) return false
+  if (state.remote_enabled) {
     try {
       const parsed = new URL(state.url)
       if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname
@@ -73,6 +81,7 @@ async function load(): Promise<void> {
     const [state, betaState] = preview
       ? [{
           enabled: false,
+          remote_enabled: false,
           url: DEFAULT_RELAY_URL,
           token: DEFAULT_RELAY_TOKEN,
           device_id: DEFAULT_RELAY_DEVICE_ID,
@@ -81,7 +90,14 @@ async function load(): Promise<void> {
         }, { enabled: false }]
       : await Promise.all([props.cli.getSoterHal(), props.cli.getSoterBeta()])
     if (currentGeneration !== generation || !props.modelValue) return
-    enabled.value = state.enabled
+    // The relay field is the persisted user preference. `enabled` is only the
+    // watchdog's current takeover marker and can briefly lag during startup.
+    remoteEnabled.value = state.remote_enabled
+    url.value = state.url
+    token.value = state.token
+    deviceId.value = state.device_id
+    tlsInsecure.value = state.tls_insecure
+    uidMap.value = state.uid_map
     saved.value = { ...state }
     soterBetaEnabled.value = betaState.enabled
     status.value = 'ready'
@@ -113,9 +129,7 @@ async function apply(): Promise<void> {
   try {
     await props.cli.setSoterHal(state)
     saved.value = { ...state }
-    emit('notify', state.enabled
-      ? tr('soter_hal_saved', 'Feature enabled')
-      : tr('soter_hal_disabled', 'Feature disabled'))
+    emit('notify', tr('soter_hal_saved', 'Soter HAL configuration saved'))
     emit('update:modelValue', false)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error)
@@ -129,14 +143,14 @@ async function apply(): Promise<void> {
 <template>
   <MiuixDialog
     :model-value="modelValue"
-    :title="tr('tools_soter_hal', 'Soter HAL')"
+    :title="tr('tools_soter_hal', 'Soter HAL configuration')"
     :close-on-click-modal="!busy"
     @update:model-value="value => { if (!value) requestClose() }"
   >
     <div class="soter-hal-dialog" :aria-busy="busy || status === 'loading'">
       <p>{{ tr('soter_hal_desc', 'Configure the Qualcomm Soter service.') }}</p>
       <p v-if="soterBetaEnabled" class="soter-hal-dialog__error">
-        Only one Soter service can be enabled at a time. Disable Tencent Soter Beta before enabling Qualcomm Soter HAL.
+        {{ tr('soter_hal_exclusive', 'Disable Tencent Soter Beta before enabling the Qualcomm Soter service.') }}
       </p>
       <div v-if="status === 'loading'" class="soter-hal-dialog__loading" role="status">
         <MiuixProgressIndicator type="circular" :size="28" />
@@ -147,8 +161,36 @@ async function apply(): Promise<void> {
           {{ tr('soter_hal_warning', 'This feature may cause probabilistic bans of Douyin accounts and other unknown issues. Please consider carefully before enabling it.') }}
         </p>
         <MiuixSwitchPreference
-          v-model="enabled"
-          :title="tr('soter_hal_enabled', 'Enable feature')"
+          v-model="remoteEnabled"
+          :title="tr('soter_hal_remote_enabled', 'Enable remote Soter relay')"
+          :disabled="busy"
+        />
+        <p class="soter-hal-dialog__hint">
+          {{ tr('soter_hal_remote_desc', 'When enabled, this switch takes over the Qualcomm Soter HAL and forwards requests to the configured relay. Disabling it restores the stock HAL.') }}
+        </p>
+        <MiuixInput
+          v-model="url"
+          :label="tr('soter_hal_url', 'Soter server URL')"
+          :disabled="busy"
+        />
+        <MiuixInput
+          v-model="deviceId"
+          :label="tr('soter_hal_device_id', 'B device ID')"
+          :disabled="busy"
+        />
+        <MiuixInput
+          v-model="token"
+          :label="tr('soter_hal_token', 'Token')"
+          :disabled="busy"
+        />
+        <MiuixInput
+          v-model="uidMap"
+          :label="tr('soter_hal_uid_map', 'UID mapping (optional)')"
+          :disabled="busy"
+        />
+        <MiuixSwitchPreference
+          v-model="tlsInsecure"
+          :title="tr('soter_hal_tls_insecure', 'Accept self-signed TLS certificates')"
           :disabled="busy"
         />
       </template>
@@ -173,11 +215,12 @@ async function apply(): Promise<void> {
 </template>
 
 <style scoped>
-.soter-hal-dialog { display: flex; flex-direction: column; gap: 14px; }
+.soter-hal-dialog { display: flex; flex-direction: column; gap: 14px; max-height: min(72vh, 620px); overflow-y: auto; }
 .soter-hal-dialog p { margin: 0; color: var(--m-color-on-surface-variant-summary); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .soter-hal-dialog__warning { color: var(--m-color-on-surface) !important; }
 .soter-hal-dialog__loading { display: flex; min-height: 64px; align-items: center; justify-content: center; gap: 12px; color: var(--m-color-on-surface-variant-summary); }
 .soter-hal-dialog__error { color: var(--m-color-error) !important; }
+.soter-hal-dialog__hint { font-size: 13px !important; }
 .soter-hal-dialog__actions { display: flex; gap: 12px; }
 .soter-hal-dialog__actions > * { flex: 1; min-width: 0; }
 .soter-hal-dialog :deep(.m-basic-component) { padding: 8px 0; }

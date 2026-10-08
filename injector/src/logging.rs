@@ -31,10 +31,10 @@ fn init_logger_inner(configured_level: LevelFilter) -> Result<()> {
     );
     let log4rs = log4rs::Logger::new(config);
 
-    multi_log::MultiLogger::init(
-        vec![Box::new(android_logger), Box::new(log4rs)],
-        log::Level::Trace,
-    )?;
+    let logger = multi_log::MultiLogger::new(vec![Box::new(android_logger), Box::new(log4rs)]);
+    log::set_boxed_logger(Box::new(
+        kmr_common::runtime::logging::RateLimitedLogger::new(logger),
+    ))?;
     log::set_max_level(configured_level);
 
     if file_logging_ready {

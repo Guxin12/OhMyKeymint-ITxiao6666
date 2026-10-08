@@ -139,8 +139,8 @@ use crate::android::system::keystore2::{
 use crate::err as ks_err;
 use crate::keymaster::enforcements::AuthInfo;
 use crate::keymaster::error::{
-    error_to_serialized_error, into_binder, into_logged_binder, map_km_error, Error, ErrorCode,
-    ResponseCode, SerializedError,
+    anyhow_error_to_serialized_error, error_to_serialized_error, into_binder, into_logged_binder,
+    map_km_error, Error, ErrorCode, ResponseCode, SerializedError,
 };
 use crate::keymaster::metrics_store::{
     log_key_operation_event_stats, log_key_operation_streaming_stats, log_operation_latency,
@@ -326,6 +326,7 @@ impl Operation {
         if let Err(e) = map_km_error(self.km_op.abort()) {
             warn!("In prune: KeyMint::abort failed: {e:?}.");
         }
+        self.auth_info.lock().unwrap().release_usage_reservation();
 
         Ok(())
     }
@@ -342,7 +343,8 @@ impl Operation {
         err: Result<T, Error>,
     ) -> Result<T, Error> {
         if let Err(e) = &err {
-            *locked_outcome = Outcome::ErrorCode(error_to_serialized_error(e))
+            *locked_outcome = Outcome::ErrorCode(error_to_serialized_error(e));
+            self.auth_info.lock().unwrap().release_usage_reservation();
         }
         err
     }
@@ -462,11 +464,11 @@ impl Operation {
             })
             .context(ks_err!("Finish failed for {:?}", self.owner))?;
 
-        self.auth_info
-            .lock()
-            .unwrap()
-            .after_finish()
-            .context("In finish.")?;
+        let usage_result = self.auth_info.lock().unwrap().after_finish();
+        if let Err(error) = &usage_result {
+            *outcome = Outcome::ErrorCode(anyhow_error_to_serialized_error(error));
+        }
+        usage_result.context("In finish.")?;
 
         // At this point the operation concluded successfully.
         *outcome = Outcome::Success;
@@ -484,6 +486,7 @@ impl Operation {
     fn abort(&self, outcome: Outcome) -> Result<()> {
         let mut locked_outcome = self.check_active().context("In abort")?;
         *locked_outcome = outcome;
+        self.auth_info.lock().unwrap().release_usage_reservation();
 
         {
             let _wp = self.watch("Operation::abort: calling IKeyMintOperation::abort");

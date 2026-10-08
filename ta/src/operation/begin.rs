@@ -37,17 +37,19 @@ use log::{info, warn};
 use std::vec::Vec;
 
 impl crate::KeyMintTa {
-    pub(crate) fn begin_operation(
+    pub(crate) fn begin_operation_with_patchlevels(
         &mut self,
         purpose: KeyPurpose,
         key_blob: &[u8],
         params: Vec<KeyParam>,
         auth_token: Option<HardwareAuthToken>,
+        patchlevels: Option<crate::RequestPatchLevels>,
     ) -> Result<InternalBeginResult, Error> {
         let op_idx = self.new_operation_index()?;
 
         // Parse and decrypt the keyblob, which requires extra hidden params.
-        let (keyblob, sdd_slot) = self.keyblob_parse_decrypt(key_blob, &params)?;
+        let (keyblob, sdd_slot) =
+            self.keyblob_parse_decrypt_with_patchlevels(key_blob, &params, patchlevels)?;
         let keyblob::PlaintextKeyBlob {
             characteristics,
             key_material,

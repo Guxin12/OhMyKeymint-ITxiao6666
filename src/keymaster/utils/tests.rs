@@ -503,19 +503,19 @@ fn test_list_key_parameters_with_filter_on_security_sensitive_info() -> Result<(
             tag: Tag::CERTIFICATE_NOT_BEFORE,
             value: KeyParameterValue::DateTime(0),
         },
+        KmKeyParameter {
+            tag: Tag::ATTESTATION_CHALLENGE,
+            value: KeyParameterValue::Blob(b"private-challenge".to_vec()),
+        },
     ];
     let wanted = vec![
-        KmKeyParameter {
-            tag: Tag::CERTIFICATE_NOT_AFTER,
-            value: KeyParameterValue::DateTime(UNDEFINED_NOT_AFTER),
-        },
-        KmKeyParameter {
-            tag: Tag::CERTIFICATE_NOT_BEFORE,
-            value: KeyParameterValue::DateTime(0),
-        },
+        Tag::CERTIFICATE_NOT_AFTER,
+        Tag::CERTIFICATE_NOT_BEFORE,
+        Tag::ATTESTATION_CHALLENGE,
     ];
 
     assert_eq!(log_security_safe_params(&params), wanted);
+    assert!(!format!("{:?}", log_security_safe_params(&params)).contains("private-challenge"));
     Ok(())
 }
 

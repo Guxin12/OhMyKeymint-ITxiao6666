@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::boxed::Box;
+use std::collections::HashMap;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -21,10 +22,11 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use std::{eprintln, format, vec::Vec};
 
 use anyhow::{anyhow, Context as _};
-use log::{LevelFilter, Record};
+use log::{Level, LevelFilter, Log, Metadata as LogMetadata, Record};
 use log4rs::append::console::ConsoleAppender;
 use log4rs::append::Append;
 use log4rs::config::{Appender, Config, Root};
@@ -32,6 +34,218 @@ use log4rs::encode::pattern::PatternEncoder;
 use log4rs::encode::{writer::simple::SimpleWriter, Encode};
 
 pub const DEFAULT_MAX_LOG_SIZE_BYTES: u64 = 4 * 1024 * 1024;
+
+const MAX_RATE_LIMIT_SITES: usize = 512;
+const WARNING_WINDOW: Duration = Duration::from_secs(30);
+const WARNING_BURST: u32 = 4;
+const VERBOSE_WINDOW: Duration = Duration::from_secs(1);
+const VERBOSE_BURST: u32 = 32;
+
+/// Apply the same bounded burst policy before logs reach Android and files.
+///
+/// Only Warn, Debug and Trace are limited. Errors always reach the underlying
+/// logger, and Info remains available for startup and state changes. Buckets
+/// contain source metadata and counts, never a formatted message or payload.
+pub struct RateLimitedLogger<L> {
+    inner: L,
+    limiter: Mutex<LogRateLimiter>,
+}
+
+impl<L: Log> RateLimitedLogger<L> {
+    pub fn new(inner: L) -> Self {
+        Self {
+            inner,
+            limiter: Mutex::new(LogRateLimiter::default()),
+        }
+    }
+
+    fn log_at(&self, record: &Record, now: Instant) {
+        if !self.inner.enabled(record.metadata()) {
+            return;
+        }
+        let decision = self
+            .limiter
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .admit(record, now);
+        if let Some(summary) = decision.summary {
+            self.publish_summary(summary);
+        }
+        if decision.publish {
+            self.inner.log(record);
+        }
+    }
+
+    fn publish_summary(&self, summary: SuppressedLogs) {
+        let site = summary.site;
+        self.inner.log(
+            &Record::builder()
+                .level(site.level)
+                .target(&site.target)
+                .module_path(site.module.as_deref())
+                .file(site.file.as_deref())
+                .line(site.line)
+                .args(format_args!(
+                    "event=log_rate_limit suppressed={} window_ms={} source_line={}",
+                    summary.count,
+                    summary.window.as_millis(),
+                    site.line.unwrap_or(0),
+                ))
+                .build(),
+        );
+    }
+}
+
+impl<L: Log> Log for RateLimitedLogger<L> {
+    fn enabled(&self, metadata: &LogMetadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &Record) {
+        self.log_at(record, Instant::now());
+    }
+
+    fn flush(&self) {
+        let summaries = self
+            .limiter
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take_summaries();
+        for summary in summaries {
+            self.publish_summary(summary);
+        }
+        self.inner.flush();
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct LogSite {
+    level: Level,
+    target: String,
+    module: Option<String>,
+    file: Option<String>,
+    line: Option<u32>,
+}
+
+impl From<&Record<'_>> for LogSite {
+    fn from(record: &Record<'_>) -> Self {
+        Self {
+            level: record.level(),
+            target: record.target().to_owned(),
+            module: record.module_path().map(str::to_owned),
+            file: record.file().map(str::to_owned),
+            line: record.line(),
+        }
+    }
+}
+
+struct LogWindow {
+    started: Instant,
+    last_seen: Instant,
+    published: u32,
+    suppressed: u64,
+}
+
+struct SuppressedLogs {
+    site: LogSite,
+    count: u64,
+    window: Duration,
+}
+
+struct LogDecision {
+    publish: bool,
+    summary: Option<SuppressedLogs>,
+}
+
+#[derive(Default)]
+struct LogRateLimiter {
+    sites: HashMap<LogSite, LogWindow>,
+}
+
+fn log_rate_policy(level: Level) -> Option<(Duration, u32)> {
+    match level {
+        Level::Warn => Some((WARNING_WINDOW, WARNING_BURST)),
+        Level::Debug | Level::Trace => Some((VERBOSE_WINDOW, VERBOSE_BURST)),
+        Level::Error | Level::Info => None,
+    }
+}
+
+impl LogRateLimiter {
+    fn admit(&mut self, record: &Record, now: Instant) -> LogDecision {
+        let Some((window, burst)) = log_rate_policy(record.level()) else {
+            return LogDecision {
+                publish: true,
+                summary: None,
+            };
+        };
+        let site = LogSite::from(record);
+        let mut summary = None;
+        if !self.sites.contains_key(&site) && self.sites.len() >= MAX_RATE_LIMIT_SITES {
+            if let Some(oldest) = self
+                .sites
+                .iter()
+                .min_by_key(|(_, bucket)| bucket.last_seen)
+                .map(|(site, _)| site.clone())
+            {
+                if let Some(bucket) = self.sites.remove(&oldest) {
+                    if bucket.suppressed != 0 {
+                        summary = Some(SuppressedLogs {
+                            window: log_rate_policy(oldest.level).unwrap().0,
+                            site: oldest,
+                            count: bucket.suppressed,
+                        });
+                    }
+                }
+            }
+        }
+        let bucket = self.sites.entry(site.clone()).or_insert(LogWindow {
+            started: now,
+            last_seen: now,
+            published: 0,
+            suppressed: 0,
+        });
+        bucket.last_seen = now;
+        if now.saturating_duration_since(bucket.started) >= window {
+            if bucket.suppressed != 0 {
+                summary = Some(SuppressedLogs {
+                    site,
+                    count: bucket.suppressed,
+                    window,
+                });
+            }
+            bucket.started = now;
+            bucket.published = 0;
+            bucket.suppressed = 0;
+        }
+        if bucket.published < burst {
+            bucket.published += 1;
+            LogDecision {
+                publish: true,
+                summary,
+            }
+        } else {
+            bucket.suppressed = bucket.suppressed.saturating_add(1);
+            LogDecision {
+                publish: false,
+                summary,
+            }
+        }
+    }
+
+    fn take_summaries(&mut self) -> Vec<SuppressedLogs> {
+        self.sites
+            .iter_mut()
+            .filter_map(|(site, bucket)| {
+                let count = std::mem::take(&mut bucket.suppressed);
+                (count != 0).then(|| SuppressedLogs {
+                    site: site.clone(),
+                    count,
+                    window: log_rate_policy(site.level).unwrap().0,
+                })
+            })
+            .collect()
+    }
+}
 
 #[derive(Debug)]
 pub struct LockedRotatingFileAppender {
@@ -262,7 +476,156 @@ pub fn build_console_file_config<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use log::Level;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Clone, Default)]
+    struct CapturedLogger {
+        records: Arc<Mutex<Vec<(Level, String)>>>,
+    }
+
+    impl Log for CapturedLogger {
+        fn enabled(&self, _metadata: &LogMetadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &Record) {
+            self.records
+                .lock()
+                .unwrap()
+                .push((record.level(), record.args().to_string()));
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn limited_message(
+        logger: &RateLimitedLogger<CapturedLogger>,
+        now: Instant,
+        level: Level,
+        source_line: u32,
+    ) {
+        logger.log_at(
+            &Record::builder()
+                .args(format_args!("event=test_runtime caller={source_line}"))
+                .level(level)
+                .target("runtime-test")
+                .module_path(Some("logging::tests"))
+                .file(Some("logging-test.rs"))
+                .line(Some(source_line))
+                .build(),
+            now,
+        );
+    }
+
+    #[test]
+    fn repeated_warnings_preserve_the_burst_and_report_suppressed_count() {
+        let sink = CapturedLogger::default();
+        let logger = RateLimitedLogger::new(sink.clone());
+        let now = Instant::now();
+        for _ in 0..12 {
+            limited_message(&logger, now, Level::Warn, 1);
+        }
+        assert_eq!(sink.records.lock().unwrap().len(), WARNING_BURST as usize);
+
+        limited_message(&logger, now + WARNING_WINDOW, Level::Warn, 1);
+        let records = sink.records.lock().unwrap();
+        assert_eq!(records.len(), WARNING_BURST as usize + 2);
+        assert_eq!(records[4].0, Level::Warn);
+        assert_eq!(
+            records[4].1,
+            "event=log_rate_limit suppressed=8 window_ms=30000 source_line=1"
+        );
+        assert!(records[5].1.starts_with("event=test_runtime"));
+    }
+
+    #[test]
+    fn warning_buckets_are_per_source_and_verbose_buckets_reset_independently() {
+        let sink = CapturedLogger::default();
+        let logger = RateLimitedLogger::new(sink.clone());
+        let now = Instant::now();
+        for _ in 0..40 {
+            limited_message(&logger, now, Level::Debug, 1);
+            limited_message(&logger, now, Level::Warn, 1);
+        }
+        limited_message(&logger, now, Level::Warn, 2);
+        assert_eq!(
+            sink.records.lock().unwrap().len(),
+            (VERBOSE_BURST + WARNING_BURST + 1) as usize
+        );
+        limited_message(&logger, now + VERBOSE_WINDOW, Level::Debug, 1);
+        limited_message(&logger, now + VERBOSE_WINDOW, Level::Warn, 1);
+        let records = sink.records.lock().unwrap();
+        assert_eq!(records.len(), (VERBOSE_BURST + WARNING_BURST + 3) as usize);
+        assert!(records[37].1.contains("suppressed=8 window_ms=1000"));
+    }
+
+    #[test]
+    fn errors_and_state_changes_are_never_rate_limited() {
+        let sink = CapturedLogger::default();
+        let logger = RateLimitedLogger::new(sink.clone());
+        let now = Instant::now();
+        for _ in 0..100 {
+            limited_message(&logger, now, Level::Error, 1);
+            limited_message(&logger, now, Level::Info, 1);
+        }
+        assert_eq!(sink.records.lock().unwrap().len(), 200);
+        assert!(logger.limiter.lock().unwrap().sites.is_empty());
+    }
+
+    #[test]
+    fn flush_reports_counts_once_without_resetting_the_warning_budget() {
+        let sink = CapturedLogger::default();
+        let logger = RateLimitedLogger::new(sink.clone());
+        let now = Instant::now();
+        for _ in 0..5 {
+            limited_message(&logger, now, Level::Warn, 1);
+        }
+        logger.flush();
+        logger.flush();
+        limited_message(&logger, now, Level::Warn, 1);
+        assert_eq!(sink.records.lock().unwrap().len(), 5);
+        logger.flush();
+        assert_eq!(sink.records.lock().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn the_rate_limiter_retains_only_bounded_source_metadata() {
+        let sink = CapturedLogger::default();
+        let logger = RateLimitedLogger::new(sink);
+        let now = Instant::now();
+        for line in 0..MAX_RATE_LIMIT_SITES as u32 + 16 {
+            limited_message(&logger, now, Level::Warn, line);
+        }
+        assert_eq!(
+            logger.limiter.lock().unwrap().sites.len(),
+            MAX_RATE_LIMIT_SITES
+        );
+    }
+
+    #[test]
+    fn concurrent_warnings_share_one_budget() {
+        let sink = CapturedLogger::default();
+        let logger = Arc::new(RateLimitedLogger::new(sink.clone()));
+        let now = Instant::now();
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let logger = logger.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..16 {
+                        limited_message(&logger, now, Level::Warn, 1);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        logger.flush();
+        let records = sink.records.lock().unwrap();
+        assert_eq!(records.len(), WARNING_BURST as usize + 1);
+        assert!(records[4].1.contains("suppressed=124"));
+    }
 
     fn temp_log_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

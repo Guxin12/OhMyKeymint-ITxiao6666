@@ -165,8 +165,8 @@ function selectColorSpec(index: number): void {
 
 function setOption(option: AppearanceOption, enabled: boolean): void {
   appearance.setOption(option, enabled)
-  // The controller couples liquid glass to the floating bar, so refresh every
-  // option after a write instead of mirroring only the switch that was touched.
+  // Refresh the local snapshot after a write so the switch state follows the
+  // controller even when another part of the WebUI reacts to the change.
   syncAppearanceState()
 }
 
@@ -430,14 +430,11 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
 }
 
 .settings-card :deep(.m-card) {
-  background: var(--m-color-primary-container);
-  background: color-mix(
-    in srgb,
-    var(--m-color-primary-container) 14%,
-    var(--m-color-surface-container)
-  );
-  border: 1px solid color-mix(in srgb, var(--m-color-primary) 8%, transparent);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 4%);
+  /* KernelSU keeps preference cards on the neutral surfaceContainer token;
+   * accent colors belong to controls and selected states, not the card. */
+  background: var(--m-color-surface-container);
+  border: 0;
+  box-shadow: none;
 }
 
 .settings-card--single :deep(.m-card) {
@@ -450,7 +447,10 @@ onBeforeUnmount(appearance.onChange(syncAppearanceState))
   width: 28px;
   align-items: center;
   justify-content: center;
-  color: var(--m-color-on-surface-variant-summary);
+  /* KernelSU's ColorPaletteScreen tints preference icons with onBackground.
+   * Using the summary token made these icons noticeably lighter than the
+   * title text, especially with a Monet seed. */
+  color: var(--m-color-on-background);
 }
 
 /* miuix-vue 0.1.1 dropdowns do not forward the start slot. Keep their

@@ -244,8 +244,9 @@ where
 {
     let (format, key_material, mut chars) = sw_keyblob::export_key(inner_keyblob, upgrade_params)?;
     debug!(
-        "importing {format:?} key material (len={}) with original chars={chars:?}",
+        "event=key_import format={format:?} material_len={} characteristic_count={}",
         key_material.len(),
+        chars.len(),
     );
     let asymmetric = chars.iter().any(|kp| {
         kp.tag == Tag::ALGORITHM
@@ -306,7 +307,7 @@ where
             value: KeyParameterValue::DateTime(UNDEFINED_NOT_AFTER),
         });
     }
-    debug!("import parameters={import_params:?}");
+    debug!("event=key_import parameter_count={}", import_params.len());
 
     let creation_result = {
         let _wp = watchdog::watch(
@@ -1058,9 +1059,10 @@ pub(crate) fn estimate_safe_amount_to_return(
         // 350KB and return a partial list.
         if bytes > response_size_limit {
             warn!(
-                "{domain:?}:{namespace}: Key descriptors list ({} items after {start_past_alias:?}) \
-                 may exceed binder size, returning {count} items est. {bytes} bytes",
+                "event=key_list_size_limit domain={domain:?} namespace={namespace} item_count={} \
+                 start_alias_present={} returned_count={count} estimated_bytes={bytes}",
                 key_descriptors.len(),
+                start_past_alias.is_some(),
             );
             break;
         }
@@ -1099,13 +1101,13 @@ pub fn count_key_entries(db: &mut KeystoreDB, domain: Domain, namespace: i64) ->
     Ok(db.count_keys(domain, namespace, KeyType::Client)? as i32)
 }
 
-/// For params remove sensitive data before returning a string for logging
-pub fn log_security_safe_params(params: &[KmKeyParameter]) -> Vec<KmKeyParameter> {
+/// Keep tag names for diagnostics without logging any parameter values.
+pub fn log_security_safe_params(params: &[KmKeyParameter]) -> Vec<Tag> {
     params
         .iter()
         .filter(|kp| kp.tag != Tag::APPLICATION_ID && kp.tag != Tag::APPLICATION_DATA)
-        .cloned()
-        .collect::<Vec<KmKeyParameter>>()
+        .map(|parameter| parameter.tag)
+        .collect()
 }
 
 /// Trait implemented by objects that can be used to decrypt cipher text using AES-GCM.

@@ -149,9 +149,81 @@ enum DeferredAuthState {
 #[derive(Debug)]
 pub struct AuthInfo {
     state: DeferredAuthState,
-    /// An optional key id required to update the usage count if the key usage is limited.
-    key_usage_limited: Option<i64>,
+    /// A live slot for a Keystore-enforced limited-use key.
+    key_usage_reservation: Option<KeyUsageReservation>,
     confirmation_token_receiver: Option<ConfirmationTokenReceiver>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct KeyUsageReservations {
+    in_flight: Arc<Mutex<HashMap<i64, u32>>>,
+}
+
+impl KeyUsageReservations {
+    fn reserve(
+        &self,
+        key_id: i64,
+        remaining: impl FnOnce() -> Result<i32>,
+    ) -> Result<KeyUsageReservation> {
+        // Reads of the durable count and commits use the same lock so an old
+        // parameter snapshot cannot reserve a use already consumed by finish.
+        let mut in_flight = self.in_flight.lock().unwrap();
+        let remaining = remaining()?;
+        if remaining <= 0 {
+            return Err(Error::Km(Ec::INVALID_KEY_BLOB))
+                .context(ks_err!("Limited-use key is exhausted."));
+        }
+        let reserved = in_flight.entry(key_id).or_default();
+        if *reserved >= remaining as u32 {
+            return Err(Error::Km(Ec::KEY_MAX_OPS_EXCEEDED)).context(ks_err!(
+                "All remaining key uses are reserved by active operations."
+            ));
+        }
+        *reserved += 1;
+        Ok(KeyUsageReservation {
+            key_id: Some(key_id),
+            in_flight: self.in_flight.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct KeyUsageReservation {
+    key_id: Option<i64>,
+    in_flight: Arc<Mutex<HashMap<i64, u32>>>,
+}
+
+impl KeyUsageReservation {
+    fn remove_slot(in_flight: &mut HashMap<i64, u32>, key_id: i64) {
+        if let Some(reserved) = in_flight.get_mut(&key_id) {
+            if *reserved > 1 {
+                *reserved -= 1;
+            } else {
+                in_flight.remove(&key_id);
+            }
+        }
+    }
+
+    pub(crate) fn commit<T>(&mut self, consume: impl FnOnce(i64) -> Result<T>) -> Result<T> {
+        let key_id = self
+            .key_id
+            .take()
+            .ok_or(Error::Km(Ec::INVALID_OPERATION_HANDLE))?;
+        let mut in_flight = self.in_flight.lock().unwrap();
+        // Keep the slot reserved until the durable update has committed. A
+        // failed update releases the slot but still prevents finish output.
+        let result = consume(key_id);
+        Self::remove_slot(&mut in_flight, key_id);
+        result
+    }
+}
+
+impl Drop for KeyUsageReservation {
+    fn drop(&mut self) {
+        if let Some(key_id) = self.key_id.take() {
+            Self::remove_slot(&mut self.in_flight.lock().unwrap(), key_id);
+        }
+    }
 }
 
 struct TokenReceiverMap {
@@ -226,8 +298,8 @@ impl TokenReceiver {
             // Emit a warning if the auth token doesn't satisfy expectations.
             if (self.auth_type.0 & hat.authenticatorType.0) == 0 {
                 error!(
-                    "Per-op {hat:?} doesn't match auth type {:?} required for key!",
-                    self.auth_type
+                    "event=auth_token_type_mismatch received_type={:?} required_type={:?}",
+                    hat.authenticatorType, self.auth_type
                 );
             }
             if !self
@@ -236,8 +308,8 @@ impl TokenReceiver {
                 .any(|&sid| hat.userId == sid.0 || hat.authenticatorId == sid.0)
             {
                 error!(
-                    "Per-op {hat:?} doesn't have a SID required for key: {:?}",
-                    self.sids
+                    "event=auth_token_sid_mismatch required_sid_count={}",
+                    self.sids.len()
                 );
             }
 
@@ -331,18 +403,25 @@ impl AuthInfo {
     /// As of this writing it checks if the key was a limited use key. If so it updates the
     /// use counter of the key in the database. When the use counter is depleted, the key gets
     /// marked for deletion and the garbage collector is notified.
-    pub fn after_finish(&self) -> Result<()> {
-        if let Some(key_id) = self.key_usage_limited {
+    pub fn after_finish(&mut self) -> Result<()> {
+        if let Some(mut reservation) = self.key_usage_reservation.take() {
             // On the last successful use, the key gets deleted. In this case we
             // have to notify the garbage collector.
-            DB.with(|db| {
-                db.borrow_mut()
-                    .check_and_update_key_usage_count(key_id)
-                    .context("Trying to update key usage count.")
-            })
-            .context(ks_err!())?;
+            reservation
+                .commit(|key_id| {
+                    DB.with(|db| {
+                        db.borrow_mut()
+                            .check_and_update_key_usage_count(key_id)
+                            .context("Trying to update key usage count.")
+                    })
+                })
+                .context(ks_err!())?;
         }
         Ok(())
+    }
+
+    pub fn release_usage_reservation(&mut self) {
+        self.key_usage_reservation.take();
     }
 
     /// This function returns the auth tokens as needed by the ongoing operation or fails with
@@ -400,9 +479,32 @@ pub struct Enforcements {
     /// The enforcement module will try to get a confirmation token from this channel whenever
     /// an operation that requires confirmation finishes.
     confirmation_token_receiver: ConfirmationTokenReceiver,
+    key_usage_reservations: KeyUsageReservations,
 }
 
 impl Enforcements {
+    pub(crate) fn reserve_key_usage(
+        &self,
+        key_id: i64,
+        key_params: &[KeyParameter],
+    ) -> Result<Option<KeyUsageReservation>> {
+        if !key_params.iter().any(|param| {
+            *param.security_level()
+                == crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel::KEYSTORE
+                && matches!(
+                    param.key_parameter_value(),
+                    KeyParameterValue::UsageCountLimit(_)
+                )
+        }) {
+            return Ok(None);
+        }
+        self.key_usage_reservations
+            .reserve(key_id, || {
+                DB.with(|db| db.borrow_mut().key_usage_count(key_id))
+            })
+            .map(Some)
+    }
+
     /// Install the confirmation token receiver. The enforcement module will try to get a
     /// confirmation token from this channel whenever an operation that requires confirmation
     /// finishes.
@@ -438,7 +540,7 @@ impl Enforcements {
                     None,
                     AuthInfo {
                         state: DeferredAuthState::NoAuthRequired,
-                        key_usage_limited: None,
+                        key_usage_reservation: None,
                         confirmation_token_receiver: None,
                     },
                 ));
@@ -498,7 +600,6 @@ impl Enforcements {
         let mut user_sids = Vec::<SecureUserId>::new();
         let mut key_time_out: Option<i64> = None;
         let mut unlocked_device_required = false;
-        let mut key_usage_limited: Option<i64> = None;
         let mut confirmation_token_receiver: Option<ConfirmationTokenReceiver> = None;
         let mut max_boot_level: Option<BootLevel> = None;
 
@@ -552,12 +653,6 @@ impl Enforcements {
                 }
                 KeyParameterValue::UnlockedDeviceRequired => {
                     unlocked_device_required = true;
-                }
-                KeyParameterValue::UsageCountLimit(_) => {
-                    // We don't examine the limit here because this is enforced on finish.
-                    // Instead, we store the key_id so that finish can look up the key
-                    // in the database again and check and update the counter.
-                    key_usage_limited = Some(key_id);
                 }
                 KeyParameterValue::TrustedConfirmationRequired => {
                     confirmation_token_receiver = Some(self.confirmation_token_receiver.clone());
@@ -630,7 +725,8 @@ impl Enforcements {
             })
             .ok_or(Error::Km(Ec::KEY_USER_NOT_AUTHENTICATED))
             .context(ks_err!(
-                "No suitable auth token for {user_sids:?} type {user_auth_type:?} received in last {key_time_out}s found",
+                "No suitable auth token for SID count {} type {user_auth_type:?} received in last {key_time_out}s found",
+                user_sids.len(),
             ))?;
             let now = BootTime::now();
             let token_age = now
@@ -674,11 +770,14 @@ impl Enforcements {
                 ),
             )
         };
+        // Reserve only after other authorization checks pass. Hardware-only
+        // limits remain the TA's responsibility.
+        let key_usage_reservation = self.reserve_key_usage(key_id, key_params)?;
         Ok((
             hat,
             AuthInfo {
                 state,
-                key_usage_limited,
+                key_usage_reservation,
                 confirmation_token_receiver,
             },
         ))
@@ -887,4 +986,166 @@ impl Enforcements {
     }
 }
 
-// TODO: Add tests to enforcement module (b/175578618).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    fn error_code<T>(result: Result<T>) -> Ec {
+        let Err(error) = result else {
+            panic!("expected error");
+        };
+        match error.root_cause().downcast_ref::<Error>().unwrap() {
+            Error::Km(code) => *code,
+            _ => panic!("expected KeyMint error"),
+        }
+    }
+
+    #[test]
+    fn hardware_enforced_usage_does_not_require_a_software_database_counter() {
+        use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+        let enforcements = Enforcements::default();
+        let params = vec![
+            KeyParameter::new(
+                KeyParameterValue::KeyPurpose(KeyPurpose::SIGN),
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+            ),
+            KeyParameter::new(
+                KeyParameterValue::NoAuthRequired,
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+            ),
+            KeyParameter::new(
+                KeyParameterValue::UsageCountLimit(1),
+                SecurityLevel::TRUSTED_ENVIRONMENT,
+            ),
+        ];
+        let (_, auth_info) = enforcements
+            .authorize_create(KeyPurpose::SIGN, Some(&(7, params)), &[], false)
+            .unwrap();
+        assert!(auth_info.key_usage_reservation.is_none());
+        assert!(enforcements
+            .key_usage_reservations
+            .in_flight
+            .lock()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn reservations_limit_concurrent_uses_and_drop_releases_the_slot() {
+        let reservations = KeyUsageReservations::default();
+        let first = reservations.reserve(7, || Ok(2)).unwrap();
+        let second = reservations.reserve(7, || Ok(2)).unwrap();
+        assert_eq!(
+            error_code(reservations.reserve(7, || Ok(2))),
+            Ec::KEY_MAX_OPS_EXCEEDED
+        );
+        drop(first);
+        let replacement = reservations.reserve(7, || Ok(2)).unwrap();
+        drop(second);
+        drop(replacement);
+        assert!(reservations.in_flight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn committed_uses_read_the_current_count_and_keep_remaining_slots_reserved() {
+        let reservations = KeyUsageReservations::default();
+        let remaining = AtomicI32::new(2);
+        let read_count = || Ok(remaining.load(Ordering::SeqCst));
+        let mut first = reservations.reserve(7, read_count).unwrap();
+        let mut second = reservations.reserve(7, read_count).unwrap();
+        first
+            .commit(|key_id| {
+                assert_eq!(key_id, 7);
+                remaining.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            error_code(reservations.reserve(7, read_count)),
+            Ec::KEY_MAX_OPS_EXCEEDED
+        );
+        second
+            .commit(|_| {
+                remaining.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            error_code(reservations.reserve(7, read_count)),
+            Ec::INVALID_KEY_BLOB
+        );
+        assert!(reservations.in_flight.lock().unwrap().is_empty());
+        assert_eq!(
+            error_code::<()>(second.commit(|_| panic!("must not consume twice"))),
+            Ec::INVALID_OPERATION_HANDLE
+        );
+    }
+
+    #[test]
+    fn failed_commit_releases_the_slot_and_a_rebound_alias_has_independent_capacity() {
+        let reservations = KeyUsageReservations::default();
+        let mut old_key = reservations.reserve(7, || Ok(1)).unwrap();
+        let new_key = reservations.reserve(8, || Ok(1)).unwrap();
+        assert_eq!(
+            error_code::<()>(
+                old_key.commit(
+                    |_| Err(Error::Km(Ec::INVALID_KEY_BLOB)).context("failed durable update")
+                )
+            ),
+            Ec::INVALID_KEY_BLOB
+        );
+        let retry = reservations.reserve(7, || Ok(1)).unwrap();
+        drop(retry);
+        drop(new_key);
+        assert!(reservations.in_flight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_reservations_do_not_overbook_a_single_remaining_use() {
+        let reservations = KeyUsageReservations::default();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let reservations = reservations.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let slot = reservations.reserve(7, || Ok(1));
+                    barrier.wait();
+                    slot
+                })
+            })
+            .collect();
+        barrier.wait();
+        barrier.wait();
+        let slots: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(slots.iter().filter(|slot| slot.is_ok()).count(), 1);
+        assert_eq!(slots.iter().filter(|slot| slot.is_err()).count(), 1);
+        drop(slots);
+        assert!(reservations.in_flight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_auth_info_releases_capacity_even_when_the_object_stays_alive() {
+        let reservations = KeyUsageReservations::default();
+        let mut auth_info = AuthInfo {
+            state: DeferredAuthState::NoAuthRequired,
+            key_usage_reservation: Some(reservations.reserve(7, || Ok(1)).unwrap()),
+            confirmation_token_receiver: None,
+        };
+        auth_info.release_usage_reservation();
+        let replacement = reservations.reserve(7, || Ok(1)).unwrap();
+        auth_info.release_usage_reservation();
+        assert_eq!(
+            error_code(reservations.reserve(7, || Ok(1))),
+            Ec::KEY_MAX_OPS_EXCEEDED
+        );
+        drop(auth_info);
+        drop(replacement);
+        assert!(reservations.in_flight.lock().unwrap().is_empty());
+    }
+}

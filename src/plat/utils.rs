@@ -5,7 +5,7 @@ use der::asn1::SetOfVec;
 use der::Encode;
 use kmr_common::crypto::Sha256;
 use kmr_crypto_boring::sha256::BoringSha256;
-use log::{debug, error};
+use log::{debug, warn};
 use rsbinder::DeathRecipient;
 
 use crate::android::apex::IApexService::IApexService;
@@ -140,7 +140,7 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
 }
 
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
-    debug!("resolving AAID uid={}", uid);
+    debug!("event=aaid_resolve uid={uid}");
     let application_id = if (uid == 0) || (uid == 1000) {
         let info = KeyAttestationPackageInfo {
             packageName: "AndroidSystem".to_string(),
@@ -154,7 +154,16 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
         get_application_id_from_provider(uid)?
     };
 
-    debug!("resolved application_id={:?}", application_id);
+    // The generated Binder Debug implementation includes every signing
+    // certificate byte. Log only counts, never that application-id payload.
+    debug!(
+        "event=aaid_resolved uid={uid} package_count={} signature_count={}",
+        application_id.packageInfos.len(),
+        application_id
+            .packageInfos
+            .first()
+            .map_or(0, |package| package.signatures.len()),
+    );
 
     encode_application_id(application_id)
 }
@@ -182,11 +191,10 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
             Result::Ok(application_id) => return Ok(application_id),
             Err(error) => {
                 if is_transaction_failed_error(&error) && tried < 2 {
-                    error!(
-                        "getKeyAttestationApplicationId transaction failed uid={}: {:?}",
-                        uid, error
+                    warn!(
+                        "event=aaid_provider_retry uid={uid} attempt={} reason=transaction_failed",
+                        tried + 1,
                     );
-                    error!("resetting cached PM instance after AAID transaction failure");
                     if use_legacy {
                         super::legacy::clear_provider_cache();
                     } else {
@@ -207,6 +215,16 @@ fn get_application_id_from_provider(uid: u32) -> anyhow::Result<KeyAttestationAp
             }
         }
     }
+}
+
+pub fn package_names_for_uid(uid: u32) -> anyhow::Result<Vec<String>> {
+    let application_id = get_application_id_from_provider(uid)?;
+    Ok(application_id
+        .packageInfos
+        .into_iter()
+        .map(|package| package.packageName)
+        .filter(|package| !package.is_empty())
+        .collect())
 }
 
 fn is_transaction_failed_error(error: &anyhow::Error) -> bool {

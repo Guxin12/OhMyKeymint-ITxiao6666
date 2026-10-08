@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock, RwLock},
@@ -427,6 +428,7 @@ fn parse_config_file(contents: &str, allow_migration: bool) -> Result<ParsedConf
         toml::from_str(&serialized).context("failed to validate migrated config.toml")?;
     validate_main_config(&config_file.main)?;
     validate_trust_config(&config_file.trust)?;
+    validate_app_patch_levels(&config_file.app_patch_levels)?;
     Ok(ParsedConfigFile {
         config_file,
         table,
@@ -692,6 +694,7 @@ pub struct Config {
     pub crypto: CryptoConfig,
     pub trust: ResolvedTrust,
     pub device: DeviceProperty,
+    pub app_patch_levels: BTreeMap<String, AppPatchLevels>,
     trust_intent: RawTrustConfig,
 }
 
@@ -702,6 +705,7 @@ impl Config {
             crypto: config_file.crypto.clone(),
             trust: resolved_trust,
             device: config_file.device.clone(),
+            app_patch_levels: config_file.app_patch_levels.clone(),
             trust_intent: config_file.trust.clone(),
         }
     }
@@ -714,6 +718,8 @@ pub struct ConfigFile {
     pub crypto: CryptoConfig,
     pub trust: RawTrustConfig,
     pub device: DeviceProperty,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_patch_levels: BTreeMap<String, AppPatchLevels>,
 }
 
 impl Default for ConfigFile {
@@ -724,8 +730,193 @@ impl Default for ConfigFile {
             crypto: CryptoConfig::default(),
             trust: RawTrustConfig::default(),
             device: DeviceProperty::default(),
+            app_patch_levels: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppPatchLevels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_patchlevel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_patchlevel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_patchlevel: Option<String>,
+}
+
+fn app_patch_target(target: &str) -> Option<(&str, Option<u32>)> {
+    let (package, user) = match target.split_once('@') {
+        Some((package, user)) if !user.is_empty() && user.bytes().all(|b| b.is_ascii_digit()) => {
+            let parsed_user = user.parse::<u32>().ok()?;
+            if parsed_user.to_string() != user
+                || parsed_user > u32::MAX / kmr_common::consts::AID_USER_OFFSET
+            {
+                return None;
+            }
+            (package, Some(parsed_user))
+        }
+        Some(_) => return None,
+        None => (target, None),
+    };
+    package
+        .split('.')
+        .all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+        .then_some((package, user))
+}
+
+fn validate_app_patch_levels(profiles: &BTreeMap<String, AppPatchLevels>) -> Result<()> {
+    for (target, profile) in profiles {
+        if app_patch_target(target).is_none() {
+            bail!("invalid app patch-level target {target:?}; expected package or package@user_id");
+        }
+        for (field, value) in [
+            ("os_patchlevel", &profile.os_patchlevel),
+            ("vendor_patchlevel", &profile.vendor_patchlevel),
+            ("boot_patchlevel", &profile.boot_patchlevel),
+        ] {
+            if let Some(value) = value {
+                if value == "auto" {
+                    continue;
+                }
+                if field == "boot_patchlevel" && value.parse::<u32>().is_ok() {
+                    continue;
+                }
+                validate_security_patch_sync_date(value)
+                    .with_context(|| format!("invalid {field} for {target}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+impl AppPatchLevels {
+    fn effective(&self, global: kmr_ta::RequestPatchLevels) -> Result<kmr_ta::RequestPatchLevels> {
+        use crate::keymaster::keymint_device::{
+            extract_boot_patchlevel, extract_patchlevel, extract_truncated_patchlevel,
+        };
+        fn explicit(value: &Option<String>) -> Option<&str> {
+            value.as_deref().filter(|value| *value != "auto")
+        }
+        Ok(kmr_ta::RequestPatchLevels {
+            os_patchlevel: explicit(&self.os_patchlevel)
+                .map(extract_truncated_patchlevel)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or(global.os_patchlevel),
+            vendor_patchlevel: explicit(&self.vendor_patchlevel)
+                .map(extract_patchlevel)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or(global.vendor_patchlevel),
+            boot_patchlevel: explicit(&self.boot_patchlevel)
+                .map(extract_boot_patchlevel)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or(global.boot_patchlevel),
+        })
+    }
+}
+
+impl Config {
+    pub fn app_patch_profile(
+        &self,
+        uid: u32,
+        packages: &[String],
+    ) -> Result<Option<kmr_ta::RequestPatchLevels>> {
+        use crate::keymaster::keymint_device::{
+            extract_boot_patchlevel, extract_patchlevel, extract_truncated_patchlevel,
+        };
+        let user = uid / kmr_common::consts::AID_USER_OFFSET;
+        let global = kmr_ta::RequestPatchLevels {
+            os_patchlevel: extract_truncated_patchlevel(&self.trust.os_patchlevel)
+                .map_err(anyhow::Error::msg)?,
+            vendor_patchlevel: extract_patchlevel(&self.trust.vendor_patchlevel)
+                .map_err(anyhow::Error::msg)?,
+            boot_patchlevel: extract_boot_patchlevel(&self.trust.boot_patchlevel)
+                .map_err(anyhow::Error::msg)?,
+        };
+        let mut selected = None;
+        for package in packages {
+            let profile = self
+                .app_patch_levels
+                .get(&format!("{package}@{user}"))
+                .or_else(|| self.app_patch_levels.get(package));
+            if let Some(profile) = profile {
+                let effective = profile.effective(global)?;
+                if selected.is_some_and(|previous| previous != effective) {
+                    return Err(crate::keymaster::error::Error::Km(
+                        crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_ARGUMENT,
+                    )).context("Shared UID packages have conflicting app patch-level profiles.");
+                }
+                selected = Some(effective);
+            }
+        }
+        Ok(selected)
+    }
+}
+
+pub fn app_patch_levels_json() -> Result<String> {
+    let config_file = load_config_file()?;
+    serde_json::to_string(&serde_json::json!({ "app_patch_levels": config_file.app_patch_levels }))
+        .context("failed to encode app patch-level profiles")
+}
+
+pub fn save_app_patch_levels_base64(payload: &str) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("saving app patch-level profiles requires root");
+    }
+    save_app_patch_levels_base64_to_path(Path::new(CONFIG_PATH), payload)
+}
+
+fn save_app_patch_levels_base64_to_path(path: &Path, payload: &str) -> Result<()> {
+    use base64::Engine;
+    if payload.len() > 4096 {
+        bail!("app patch-level payload is too large");
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Update {
+        target: String,
+        os_patchlevel: Option<String>,
+        vendor_patchlevel: Option<String>,
+        boot_patchlevel: Option<String>,
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .context("invalid app patch-level base64")?;
+    let update: Update =
+        serde_json::from_slice(&decoded).context("invalid app patch-level JSON")?;
+    let profile = AppPatchLevels {
+        os_patchlevel: update.os_patchlevel,
+        vendor_patchlevel: update.vendor_patchlevel,
+        boot_patchlevel: update.boot_patchlevel,
+    };
+    let profiles = BTreeMap::from([(update.target.clone(), profile.clone())]);
+    validate_app_patch_levels(&profiles)?;
+    let _write_guard = CONFIG_FILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| anyhow!("config file write lock poisoned"))?;
+    let existing = fs::read_to_string(path).context("failed to read config.toml")?;
+    let mut parsed = parse_config_file(&existing, false)?;
+    let profiles = parsed
+        .table
+        .entry("app_patch_levels")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("invalid app_patch_levels table"))?;
+    profiles.insert(update.target, toml::Value::try_from(profile)?);
+    let contents = toml::to_string_pretty(&parsed.table)?;
+    parse_config_file(&contents, false)?;
+    persist_config_contents_unlocked(path, &contents)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1851,6 +2042,116 @@ imei2 = ""
     #[derive(Deserialize)]
     struct TrustValueToml {
         value: TrustValueSpec,
+    }
+
+    fn app_profile_config() -> Config {
+        Config::from_file(
+            &ConfigFile::default(),
+            ResolvedTrust {
+                os_version: 16,
+                security_patch: "2026-06-05".into(),
+                os_patchlevel: "2026-06-05".into(),
+                vendor_patchlevel: "2026-06-05".into(),
+                boot_patchlevel: "2026-06-05".into(),
+                vb_key: [0; 32],
+                vb_hash: [0; 32],
+                vb_key_source: TrustValueSource::Property,
+                vb_hash_source: TrustValueSource::Property,
+                verified_boot_state: true,
+                device_locked: true,
+            },
+        )
+    }
+
+    #[test]
+    fn app_patch_profiles_are_user_scoped_and_shared_uid_conflicts_are_authoritative() {
+        let mut config = app_profile_config();
+        config.app_patch_levels.insert(
+            "com.example.app".into(),
+            AppPatchLevels {
+                os_patchlevel: Some("2026-04-05".into()),
+                ..Default::default()
+            },
+        );
+        config
+            .app_patch_levels
+            .insert("com.example.app@10".into(), AppPatchLevels::default());
+        let packages = vec!["com.example.app".into()];
+        assert_eq!(
+            config
+                .app_patch_profile(10123, &packages)
+                .unwrap()
+                .unwrap()
+                .os_patchlevel,
+            202604
+        );
+        assert_eq!(
+            config
+                .app_patch_profile(1010123, &packages)
+                .unwrap()
+                .unwrap()
+                .os_patchlevel,
+            202606
+        );
+        assert!(config
+            .app_patch_profile(10123, &["com.unmatched.app".into()])
+            .unwrap()
+            .is_none());
+        config.app_patch_levels.insert(
+            "com.shared.app".into(),
+            AppPatchLevels {
+                os_patchlevel: Some("2026-05-05".into()),
+                ..Default::default()
+            },
+        );
+        let error = config
+            .app_patch_profile(10123, &["com.example.app".into(), "com.shared.app".into()])
+            .unwrap_err();
+        assert!(matches!(
+            error
+                .root_cause()
+                .downcast_ref::<crate::keymaster::error::Error>(),
+            Some(crate::keymaster::error::Error::Km(
+                crate::android::hardware::security::keymint::ErrorCode::ErrorCode::INVALID_ARGUMENT
+            ))
+        ));
+    }
+
+    #[test]
+    fn app_patch_profile_save_preserves_secrets_and_explicit_empty_user_profile() {
+        use base64::Engine;
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        let original = ConfigFile::default();
+        persist_config_file_to_path(&path, &original).unwrap();
+        let payload = base64::engine::general_purpose::STANDARD.encode(
+            r#"{"target":"com.example.app@10","os_patchlevel":null,"vendor_patchlevel":null,"boot_patchlevel":null}"#
+        );
+        save_app_patch_levels_base64_to_path(&path, &payload).unwrap();
+        let parsed = parse_config_file(&fs::read_to_string(&path).unwrap(), false)
+            .unwrap()
+            .config_file;
+        assert_eq!(parsed.crypto, original.crypto);
+        assert_eq!(parsed.trust, original.trust);
+        assert_eq!(
+            parsed.app_patch_levels["com.example.app@10"],
+            AppPatchLevels::default()
+        );
+        for json in [
+            r#"{"target":"com.example.app@00","os_patchlevel":"2026-04-05"}"#,
+            r#"{"target":"com.example.app","os_patchlevel":"latest"}"#,
+            r#"{"target":"com.example.app","vendor_patchlevel":"2026-02-30"}"#,
+            r#"{"target":"com.example.app","boot_patchlevel":"4294967296"}"#,
+            r#"{"target":"com.example.app","mode":"patch"}"#,
+        ] {
+            let prior = fs::read_to_string(&path).unwrap();
+            let payload = base64::engine::general_purpose::STANDARD.encode(json);
+            assert!(
+                save_app_patch_levels_base64_to_path(&path, &payload).is_err(),
+                "{json}"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), prior);
+        }
     }
 
     #[derive(Serialize, Deserialize)]

@@ -6,6 +6,9 @@
 //! would mix two different ASK/AuthKey identities in the same application slot.
 
 use std::io::Read;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -20,6 +23,43 @@ const DEFAULT_RELAY_URL: &str = "http://110.40.170.96:10886";
 const DEFAULT_RELAY_DEVICE_ID: &str = "device-b-c3f204aa";
 const DEFAULT_RELAY_TOKEN: &str = "aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd";
 static CLIENT: OnceLock<Mutex<Option<(bool, reqwest::blocking::Client)>>> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_PATH: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+pub(crate) fn config_path() -> std::borrow::Cow<'static, Path> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CONFIG_PATH.with(|slot| slot.borrow().clone()) {
+        return std::borrow::Cow::Owned(path);
+    }
+    std::borrow::Cow::Borrowed(Path::new(CONFIG_PATH))
+}
+
+#[cfg(test)]
+pub(crate) struct TestConfigPath {
+    previous: Option<PathBuf>,
+    // A thread-local override must be restored on the thread that installed it.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_config_path(path: PathBuf) -> TestConfigPath {
+    TestConfigPath {
+        previous: TEST_CONFIG_PATH.with(|slot| slot.replace(Some(path))),
+        _thread: std::marker::PhantomData,
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestConfigPath {
+    fn drop(&mut self) {
+        TEST_CONFIG_PATH.with(|slot| slot.replace(self.previous.take()));
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
@@ -44,7 +84,10 @@ impl Config {
             };
             let value = value.trim();
             match key.trim() {
-                "enabled" => config.enabled = parse_bool(value)?,
+                // `enabled` is the legacy spelling used by older OMK
+                // installations.  New WebUI saves use `remote_enabled` so
+                // the local software-TA takeover switch can be independent.
+                "enabled" | "remote_enabled" => config.enabled = parse_bool(value)?,
                 "url" => config.url = value.to_string(),
                 "token" => config.token = value.to_string(),
                 "device_id" => config.device_id = value.to_string(),
@@ -89,7 +132,7 @@ impl Config {
     }
 
     pub fn load() -> Result<Self, String> {
-        match std::fs::read_to_string(CONFIG_PATH) {
+        match std::fs::read_to_string(config_path()) {
             Ok(raw) => Self::parse(&raw),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(format!("cannot read SOTER remote config: {error}")),
@@ -303,6 +346,27 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
+    fn config_fixture_is_thread_local_and_restores_the_previous_path() {
+        let absent =
+            std::env::temp_dir().join(format!("soterta-absent-config-{}", std::process::id()));
+        let _outer = test_config_path(absent.clone());
+        assert_eq!(Config::load().unwrap(), Config::default());
+        let nested = absent.with_extension("nested");
+        {
+            let _inner = test_config_path(nested.clone());
+            assert_eq!(config_path().as_ref(), nested.as_path());
+            assert_eq!(
+                std::thread::spawn(|| config_path().into_owned())
+                    .join()
+                    .unwrap(),
+                PathBuf::from(CONFIG_PATH)
+            );
+        }
+        assert_eq!(config_path().as_ref(), absent.as_path());
+        assert_eq!(Config::load().unwrap(), Config::default());
+    }
+
+    #[test]
     fn separate_config_is_off_by_default_and_uid_map_is_explicit() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
         let defaults = Config::parse("enabled=true").unwrap();
@@ -341,6 +405,9 @@ mod tests {
         assert_eq!(cfg.device_id, "synthetic-b");
         assert_eq!(mapped_uid(10001, &cfg.uid_map), 10002);
         assert_eq!(mapped_uid(20001, &cfg.uid_map), 20001);
+        let split = Config::parse("remote_enabled=true").unwrap();
+        assert!(split.enabled);
+        assert_eq!(split.url, DEFAULT_RELAY_URL);
         let body = request_body(
             &cfg,
             dispatch::TX_INIT_SIGN,

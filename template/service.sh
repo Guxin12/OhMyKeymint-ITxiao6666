@@ -38,7 +38,7 @@ start_daemon "$MODDIR/daemon" "$STATE_DIR/keymint-daemon.pid"
 start_daemon "$MODDIR/daemon-injector" "$STATE_DIR/injector-daemon.pid"
 # Keep the Qualcomm Soter watchdog alive independently of the KeyMint route.
 # It owns vendor.qti.hardware.soter.ISoter/default only when its persistent
-# remote-relay enable flag requests it; otherwise the stock HAL remains active.
+# software-TA takeover flag requests it; otherwise the stock HAL remains active.
 start_daemon "$MODDIR/soterta.sh" "$STATE_DIR/soterta-watchdog.pid"
 
 

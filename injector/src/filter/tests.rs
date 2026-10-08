@@ -144,3 +144,108 @@ fn empty_scope_keeps_android_and_denylist_precedence() {
     );
     assert_eq!(decision.reason, FilterReason::RejectedByDenylist);
 }
+
+#[test]
+fn package_user_target_matches_only_the_current_caller_user() {
+    let scope = vec!["com.allowed@10".to_string()];
+    for (uid, allowed) in [(10_123, false), (1_010_123, true), (1_110_123, false)] {
+        let decision = evaluate(
+            &scope,
+            &base_config(),
+            uid,
+            PackageResolution::Known(vec!["com.allowed".to_string()]),
+        );
+        assert_eq!(decision.allowed, allowed, "caller uid={uid}");
+    }
+    for uid in [10_123, 1_010_123] {
+        assert!(
+            evaluate(
+                &base_scope(),
+                &base_config(),
+                uid,
+                PackageResolution::Known(vec!["com.allowed".to_string()]),
+            )
+            .allowed
+        );
+    }
+}
+
+#[test]
+fn uid_target_matches_the_full_uid_and_still_obeys_package_safety() {
+    let scope = vec!["uid:1010123".to_string()];
+    let mut config = base_config();
+    for (uid, allowed) in [(10_123, false), (1_010_123, true)] {
+        assert_eq!(
+            evaluate(
+                &scope,
+                &config,
+                uid,
+                PackageResolution::Known(vec!["com.unlisted".to_string()]),
+            )
+            .allowed,
+            allowed
+        );
+    }
+    assert_eq!(
+        evaluate(&scope, &config, 1_010_123, PackageResolution::Unknown).reason,
+        FilterReason::RejectedUnknownPackage
+    );
+    config.deny_packages = vec!["com.blocked".to_string()];
+    assert_eq!(
+        evaluate(
+            &scope,
+            &config,
+            1_010_123,
+            PackageResolution::Known(vec!["com.unlisted".to_string(), "com.blocked".to_string()]),
+        )
+        .reason,
+        FilterReason::RejectedByDenylist
+    );
+    assert_eq!(
+        evaluate(
+            &scope,
+            &config,
+            1_010_123,
+            PackageResolution::Known(vec!["android".to_string()]),
+        )
+        .reason,
+        FilterReason::RejectedAndroidPackage
+    );
+    assert_eq!(
+        evaluate(
+            &["uid:1000".to_string()],
+            &config,
+            1000,
+            PackageResolution::Unknown
+        )
+        .reason,
+        FilterReason::RejectedAndroidPackage
+    );
+}
+
+#[test]
+fn package_user_target_applies_to_shared_uid_with_deny_priority() {
+    let scope = vec!["com.allowed@10".to_string()];
+    let packages = vec!["com.other".to_string(), "com.allowed".to_string()];
+    let mut config = base_config();
+    assert!(
+        evaluate(
+            &scope,
+            &config,
+            1_010_123,
+            PackageResolution::Known(packages.clone()),
+        )
+        .allowed
+    );
+    config.deny_packages = vec!["com.other".to_string()];
+    assert_eq!(
+        evaluate(
+            &scope,
+            &config,
+            1_010_123,
+            PackageResolution::Known(packages)
+        )
+        .reason,
+        FilterReason::RejectedByDenylist
+    );
+}

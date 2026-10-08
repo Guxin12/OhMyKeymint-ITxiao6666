@@ -15,13 +15,12 @@
   --omk-nav-height: 64px;
   --omk-nav-bottom: var(--omk-bottom-inset);
   --omk-nav-clearance: calc(var(--omk-nav-height) + (var(--omk-nav-bottom) + 12px) / var(--omk-ui-scale));
-  --omk-bar-background: rgb(247 247 247 / 82%);
+  --omk-bar-background: rgb(247 247 247 / 87%);
   --omk-top-bar-fill: var(--m-color-surface);
   --omk-system-bar-background: var(--m-color-surface);
   --omk-host-bar-background: #f7f7f7;
-  --omk-glass-background: rgb(255 255 255 / 54%);
+  --omk-glass-background: rgb(255 255 255 / 40%);
   --omk-identity-mix: 42%;
-  --omk-activity-mix: 24%;
   --omk-preference-mix: 24%;
   --omk-ui-scale: 1;
 }
@@ -46,7 +45,7 @@
 
 :root.m-theme-dark {
   --omk-bar-background: rgb(0 0 0 / 78%);
-  --omk-glass-background: rgb(36 36 36 / 58%);
+  --omk-glass-background: rgb(36 36 36 / 40%);
 }
 
 /* app.scss is injected after miuix-vue's stylesheet.  Keep the surface
@@ -188,6 +187,12 @@ body::after {
 }
 body::before { top: 0; height: var(--omk-top-inset); }
 body::after { bottom: 0; height: var(--omk-bottom-inset); }
+:root[data-bar-blur='true'] body::before,
+:root[data-bar-blur='true'] body::after,
+:root[data-floating-bottom-bar='true'][data-liquid-glass='true'] body::after,
+:root[data-bar-blur='true'] .m-top-app-bar::before {
+  background: transparent;
+}
 button, input, textarea { font: inherit; }
 button { touch-action: manipulation; }
 .omk-app {
@@ -254,8 +259,7 @@ button { touch-action: manipulation; }
 .identity-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .identity-card { min-width: 0; }
 .identity-card > .m-card { height: 100%; min-height: 182px; padding: 16px; }
-.identity-card > .m-card,
-.activity-card > .m-card {
+.identity-card > .m-card {
   /* KernelSU-style tonal surfaces: the active accent is visible as a
    * soft fill instead of leaving every raised card pure white. */
   background: var(--m-color-surface-container);
@@ -265,14 +269,6 @@ button { touch-action: manipulation; }
   background: color-mix(
     in srgb,
     var(--m-color-primary-container) var(--omk-identity-mix),
-    var(--m-color-surface-container)
-  );
-}
-.activity-card > .m-card {
-  background: var(--m-color-primary-container);
-  background: color-mix(
-    in srgb,
-    var(--m-color-primary-container) var(--omk-activity-mix),
     var(--m-color-surface-container)
   );
 }
@@ -291,30 +287,46 @@ button { touch-action: manipulation; }
 [data-tone='loading'] { opacity: .7; }
 .home-page .m-top-app-bar__title { align-items: flex-start; width: 100%; padding-inline: var(--omk-page-side); text-align: start; }
 .home-page .m-top-app-bar__title .m-text { font-size: clamp(20px, 5.3vw, 24px); line-height: 1.2; }
-.activity-card { margin-top: 12px; }
-.activity-card > .m-card { padding: 10px 4px 12px; }
-.activity-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 10px 3px; }
-.activity-heading h2 { margin: 0; font-size: 17px; }
-.activity-heading span { color: var(--m-color-on-surface-variant-summary); font-size: 12px; }
-.activity-list { margin: 0; padding: 0; list-style: none; }
-.activity-list .m-basic-component { min-height: 60px; padding: 10px 8px; }
-.activity-list .m-basic-component__center { min-width: 0; }
-.activity-list .m-basic-component__row { align-items: flex-start; }
-.activity-list .m-basic-component__start { padding-top: 3px; }
-.activity-list .m-basic-component__end { align-items: center; }
-.activity-list .m-basic-component__title {
-  color: var(--m-color-on-surface);
-  font-size: 16px;
-  line-height: 1.3;
-  font-weight: 600;
+.diagnostics-card { margin-top: 12px; }
+.diagnostics-card > .m-card { padding: 14px 12px; background: var(--m-color-surface-container); }
+.diagnostics-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 2px 10px; }
+.diagnostics-heading h2 { margin: 0; font-size: 17px; line-height: 1.3; }
+.diagnostics-heading span { color: var(--m-color-on-surface-variant-summary); font-size: 13px; line-height: 1.4; }
+.diagnostics-refresh { min-height: 34px; padding: 6px 12px; font-size: 14px; flex-shrink: 0; margin-left: 10px; }
+.diagnostics-empty { min-height: 56px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--m-color-on-surface-variant-summary); }
+.diagnostics-services { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.diagnostics-service { min-width: 0; padding: 9px 10px; border-radius: 10px; background: color-mix(in srgb, var(--m-color-surface-container-high) 72%, transparent); }
+.diagnostics-service dt { color: var(--m-color-on-surface-variant-summary); font-size: 13px; line-height: 1.4; }
+.diagnostics-service dd { margin: 3px 0 0; color: var(--m-color-on-surface); font-size: 14px; font-weight: 600; line-height: 1.3; }
+.diagnostics-service dd[data-tone='ok'] { color: var(--m-color-primary); }
+.diagnostics-service dd[data-tone='error'] { color: var(--m-color-error); }
+.diagnostics-service dd small { display: block; margin-top: 2px; color: var(--m-color-on-surface-variant-summary); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.diagnostics-note { padding: 12px 2px 0; line-height: 1.5; }
+.keybox-inspector { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--m-color-outline-variant); }
+.keybox-inspector h3 { margin: 0 0 8px; color: var(--m-color-on-surface); font-size: 14px; line-height: 1.35; }
+.diagnostics-muted { margin: 0; color: var(--m-color-on-surface-variant-summary); font-size: 13px; }
+.keybox-chains { display: grid; gap: 7px; }
+.keybox-chain { min-width: 0; overflow: hidden; border-radius: 12px; background: var(--m-color-surface-container-high); }
+.keybox-chain .m-basic-component { min-height: 58px; padding: 10px 12px; }
+.keybox-chain .m-basic-component__center { min-width: 0; }
+.keybox-chain .m-basic-component__center .m-text:first-child { font-size: 15px; line-height: 1.4; }
+.keybox-chain .m-basic-component__center .m-text:last-child { font-size: 13px; line-height: 1.4; }
+.keybox-chain__expand { color: var(--m-color-on-surface-variant-summary); transition: transform 180ms ease; }
+.keybox-chain__expand.is-expanded { transform: rotate(180deg); }
+.keybox-chain__collapse { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms ease, opacity 160ms ease; }
+.keybox-chain__collapse.is-expanded { grid-template-rows: 1fr; opacity: 1; }
+.keybox-certificates { min-width: 0; min-height: 0; overflow: hidden; padding: 0 12px 12px; }
+.keybox-certificate { min-width: 0; padding: 10px 0; border-top: 1px solid var(--m-color-outline-variant); }
+.keybox-certificate:first-child { padding-top: 2px; border-top: 0; }
+.keybox-certificate h4 { margin: 0 0 8px; color: var(--m-color-on-surface); font-size: 14px; line-height: 1.4; }
+.keybox-certificate__details { min-width: 0; margin: 0; }
+.keybox-certificate__details > div { display: grid; grid-template-columns: minmax(54px, auto) minmax(0, 1fr); gap: 4px 8px; min-width: 0; padding: 0 0 6px; }
+.keybox-certificate__details > div:last-child { padding-bottom: 0; }
+.keybox-certificate__details dt { color: var(--m-color-on-surface-variant-summary); font-size: 13px; line-height: 1.5; }
+.keybox-certificate__details dd { margin: 0; overflow-wrap: anywhere; color: var(--m-color-on-surface); font-size: 14px; line-height: 1.5; }
+@media (prefers-reduced-motion: reduce) {
+  .keybox-chain__expand, .keybox-chain__collapse { transition: none; }
 }
-.activity-list .m-basic-component__summary {
-  color: var(--m-color-on-surface-variant-summary);
-  font-weight: 400;
-}
-.activity-list time { color: var(--m-color-on-surface-variant-summary); font-size: 12px; line-height: 1.4; }
-.activity-toggle.m-button { width: calc(100% - 20px); margin: 4px 10px 0; color: var(--m-color-primary); }
-.activity-empty { min-height: 120px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--m-color-on-surface-variant-summary); }
 .preference-section { margin-top: 4px; }
 .preference-section > .m-small-title,
 .settings-section > .m-small-title { padding: 10px 19px 8px; }
@@ -333,7 +345,6 @@ button { touch-action: manipulation; }
  * disabled.  Keep a previously selected custom seed from tinting every card
  * after the user turns the dynamic palette off. */
 :root[data-monet='false'] .identity-card > .m-card,
-:root[data-monet='false'] .activity-card > .m-card,
 :root[data-monet='false'] .preference-card > .m-card,
 :root[data-monet='false'] .settings-card .m-card {
   background: var(--m-color-surface-container) !important;
@@ -367,7 +378,7 @@ button { touch-action: manipulation; }
   pointer-events: none;
 }
 .main-navigation {
-  --omk-nav-indicator-fill: var(--m-color-tertiary-container);
+  --omk-nav-indicator-fill: var(--m-color-primary-container);
   position: relative;
   flex: none;
   width: calc(100% / var(--omk-ui-scale));
@@ -381,7 +392,7 @@ button { touch-action: manipulation; }
 .main-navigation .m-navigation-bar__item:active { transform: scale(.94); }
 .main-navigation .m-navigation-bar__icon { transition: transform 220ms cubic-bezier(.2, .8, .2, 1); }
 .main-navigation .m-navigation-bar__item--selected .m-navigation-bar__icon { transform: translateY(-1px); }
-.main-navigation .m-navigation-bar__row::before {
+:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__row::before {
   content: '';
   position: absolute;
   top: 7px;
@@ -393,23 +404,25 @@ button { touch-action: manipulation; }
   transition: transform 240ms cubic-bezier(.2, .8, .2, 1);
   pointer-events: none;
 }
-.main-navigation .m-navigation-bar__item--selected { color: var(--m-color-primary); }
+:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item--selected {
+  color: var(--m-color-primary);
+}
 .main-navigation .m-navigation-bar__label { max-width: 100%; padding-inline: 4px; line-height: 1.25; }
 :root[data-bar-blur='true'] {
   --omk-top-bar-fill: var(--omk-bar-background);
 }
 @supports (background: color-mix(in srgb, white, transparent)) {
-  :root[data-bar-blur='true'] { --omk-top-bar-fill: color-mix(in srgb, var(--m-color-surface) 78%, transparent); }
+  :root[data-bar-blur='true'] { --omk-top-bar-fill: color-mix(in srgb, var(--m-color-surface) 87%, transparent); }
 }
 :root[data-bar-blur='true'] .m-top-app-bar,
-:root[data-bar-blur='true'] .main-navigation {
+:root[data-bar-blur='true'][data-floating-bottom-bar='false'] .main-navigation {
   /* A translucent layer is required for backdrop-filter to reveal the page
    * beneath it.  Keep an rgba fallback for older Android WebViews, then use
    * the active MIUIX surface token so dark/AMOLED themes never turn white. */
   background: var(--omk-bar-background);
-  background: color-mix(in srgb, var(--m-color-surface) 78%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.2);
-  backdrop-filter: blur(22px) saturate(1.2);
+  background: color-mix(in srgb, var(--m-color-surface) 87%, transparent);
+  -webkit-backdrop-filter: blur(25px) saturate(1.2);
+  backdrop-filter: blur(25px) saturate(1.2);
 }
 :root[data-floating-bottom-bar='true'] {
   --omk-nav-bottom: max(28px, calc(var(--omk-bottom-inset) + 8px));
@@ -426,6 +439,11 @@ button { touch-action: manipulation; }
   border-radius: 32px;
   background: var(--m-color-surface-container);
   box-shadow: 0 0 10px rgb(0 0 0 / 10%);
+  touch-action: none;
+  transform: translate3d(var(--omk-liquid-nav-panel-offset, 0px), 0, 0)
+    scale(var(--omk-ui-scale));
+  transition: transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
 }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-divider { display: none; }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__row::before {
@@ -433,37 +451,25 @@ button { touch-action: manipulation; }
   height: 56px;
   border-radius: 28px;
   background: var(--omk-nav-indicator-fill);
+  background: color-mix(in srgb, var(--m-color-primary) 15%, transparent);
+  transition: transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item { height: 56px; border-radius: 28px; opacity: 1; }
-:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item--selected { background: transparent; color: var(--m-color-on-tertiary-container); }
+:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item--selected { background: transparent; color: var(--m-color-primary); }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__icon { margin-top: 4px; }
 :root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__label { font-size: 11px; margin-bottom: 4px; }
-:root[data-bar-blur='true'][data-floating-bottom-bar='true'] .main-navigation {
-  background: var(--omk-top-bar-fill);
-}
-:root[data-liquid-glass='true'] .main-navigation {
+:root[data-floating-bottom-bar='true'][data-liquid-glass='true'] .main-navigation {
   overflow: hidden;
   background: var(--omk-glass-background);
-  background: color-mix(in srgb, var(--m-color-surface-container) 58%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
-  backdrop-filter: blur(22px) saturate(1.35);
+  background: color-mix(in srgb, var(--m-color-surface-container) 40%, transparent);
+  -webkit-backdrop-filter: blur(25px) saturate(1.35);
+  backdrop-filter: blur(25px) saturate(1.35);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%), 0 3px 16px rgb(0 0 0 / 16%);
 }
-:root[data-liquid-glass='true'] { --omk-top-bar-fill: var(--omk-glass-background); }
-@supports (background: color-mix(in srgb, white, transparent)) {
-  :root[data-liquid-glass='true'] { --omk-top-bar-fill: color-mix(in srgb, var(--m-color-surface) 58%, transparent); }
-}
-:root[data-liquid-glass='true'] .m-top-app-bar {
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
-  backdrop-filter: blur(22px) saturate(1.35);
-  box-shadow: inset 0 -1px 0 rgb(255 255 255 / 12%);
-}
-:root[data-liquid-glass='true'] .main-navigation .m-navigation-bar__item--selected {
-  /* Keep the selected pill tied to the active accent instead of the
-   * neutral glass tint.  The solid container fallback is used by older
-   * WebViews that do not implement color-mix(). */
-  background: var(--m-color-primary-container);
-  background: color-mix(in srgb, var(--m-color-primary) 18%, transparent);
+:root[data-floating-bottom-bar='true'][data-liquid-glass='true'] .main-navigation .m-navigation-bar__item--selected {
+  /* The moving pseudo-element is the selected surface; the item remains
+   * transparent so the lens can slide continuously between tabs. */
+  background: transparent;
   color: var(--m-color-primary);
 }
 
@@ -482,9 +488,9 @@ button { touch-action: manipulation; }
    * layer backdrop-filter has no backdrop to sample and older WebViews paint
    * the bar as a fully transparent strip. */
   background: var(--omk-glass-background);
-  background: color-mix(in srgb, var(--m-color-surface-container) 58%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
-  backdrop-filter: blur(22px) saturate(1.35);
+  background: color-mix(in srgb, var(--m-color-surface-container) 40%, transparent);
+  -webkit-backdrop-filter: blur(25px) saturate(1.35);
+  backdrop-filter: blur(25px) saturate(1.35);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%), 0 3px 16px rgb(0 0 0 / 16%);
   transform: translate3d(var(--omk-liquid-nav-panel-offset), 0, 0) scale(var(--omk-ui-scale));
   transition: transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -500,14 +506,14 @@ button { touch-action: manipulation; }
   left: 4px;
   width: calc((100% - 8px) / 3);
   border-radius: 28px;
-  background: var(--m-color-primary-container);
-  background: color-mix(in srgb, var(--m-color-primary) 16%, transparent);
+  background: rgb(0 0 0 / 10%);
+  background: color-mix(in srgb, var(--m-color-on-surface) 10%, transparent);
   background-image: radial-gradient(
     circle 72px at var(--omk-liquid-nav-highlight-x) 50%,
     rgb(255 255 255 / 18%),
     transparent 72%
   );
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-color-primary) 20%, transparent),
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 20%),
     inset 0 0 10px rgb(0 0 0 / 8%), 0 4px 12px rgb(0 0 0 / 10%);
   content: '';
   pointer-events: none;
@@ -521,14 +527,14 @@ button { touch-action: manipulation; }
 
 :root[data-theme-resolved='dark'][data-floating-bottom-bar='true'][data-liquid-glass='true']
   .main-navigation::before {
-  background: var(--m-color-primary-container);
-  background: color-mix(in srgb, var(--m-color-primary) 24%, transparent);
+  background: rgb(255 255 255 / 10%);
+  background: color-mix(in srgb, var(--m-color-on-surface) 10%, transparent);
   background-image: radial-gradient(
     circle 72px at var(--omk-liquid-nav-highlight-x) 50%,
     rgb(255 255 255 / 14%),
     transparent 72%
   );
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-color-primary) 30%, transparent),
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 18%),
     0 4px 14px rgb(0 0 0 / 22%);
 }
 
@@ -567,11 +573,32 @@ button { touch-action: manipulation; }
   .main-navigation.is-dragging::before {
   transition: none;
 }
-:root.m-theme-dark[data-liquid-glass='true'] .main-navigation .m-navigation-bar__item--selected {
+:root[data-floating-bottom-bar='true'] .main-navigation.is-dragging
+  .m-navigation-bar__row::before {
+  transition: none;
+}
+:root.m-theme-dark[data-floating-bottom-bar='true'][data-liquid-glass='true']
+  .main-navigation .m-navigation-bar__item--selected {
   /* The shared ::before lens paints the selected state.  Keep the button
    * itself transparent so the lens can slide freely between tabs in dark
    * mode as well. */
   background: transparent;
+}
+
+/* Match KernelSU's opaque fallback when the WebView cannot provide a
+ * backdrop blur surface. */
+:root[data-backdrop-blur-supported='false'][data-bar-blur='true'] .m-top-app-bar,
+:root[data-backdrop-blur-supported='false'][data-bar-blur='true'][data-floating-bottom-bar='false']
+  .main-navigation {
+  background: var(--m-color-surface) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+:root[data-backdrop-blur-supported='false'][data-floating-bottom-bar='true'][data-liquid-glass='true']
+  .main-navigation {
+  background: var(--m-color-surface-container);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .confirm-sheet { display: grid; gap: 18px; padding-top: 4px; }
