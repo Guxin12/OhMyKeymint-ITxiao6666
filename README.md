@@ -1,166 +1,38 @@
-# Oh My Keymint
+# Oh My Keymint（第三方版本）
 
-[![Telegram](https://img.shields.io/static/v1?label=Telegram&message=@OhMyKeymint&color=0088cc)](https://t.me/OhMyKeymint)  [![CI Build](https://github.com/qwq233/OhMyKeymint/actions/workflows/ci.yml/badge.svg)](https://github.com/qwq233/OhMyKeymint/actions/workflows/ci.yml)
+> 本仓库是基于 [qwq233/OhMyKeymint](https://github.com/qwq233/OhMyKeymint) 修改的第三方版本，**不是官方版本，也不代表上游维护者**。本版本的问题请反馈至[本仓库](https://github.com/ITxiao6666/OhMyKeymint/issues)。
 
-Custom keystore implementation for Android Keystore Spoofer
+面向 Android 的自定义 Keystore / KeyMint 实现，提供应用配置、Keybox 管理及配套 WebUI。
 
-## What is this?
+## 安装与使用
 
-This is a complete implementation of the keystore, which fully implements the AOSP AIDL interface, referencing the official AOSP implementation.
+需要 **Android 12 及以上**，以及 KernelSU 或 Magisk。
 
-In theory, this would make it harder for detectors to identify behavior inconsistent with AOSP, thus achieving greater stealth than the FOSS branch of TrickyStore or other TrickyStore-based module like TEESimulator.
+1. 从本仓库的 [Releases](https://github.com/ITxiao6666/OhMyKeymint/releases) 下载并安装模块。
+2. 打开 WebUI，选择需要使用 OMK 的应用，按需导入 Keybox。
+3. 高级设置及生效条件请参阅[配置指南](docs/CONFIGURATION.md)。
 
-## Install and configure
+KernelSU 可直接从模块列表打开 WebUI；Magisk 需自行安装 KSUWebUIStandalone 或 WebUI X。
+Zygisk 相关功能需另行安装并启用 Zygisk Next。
 
-**Android 12 or above required.**
+## 主要功能
 
-1. Install this module.
+- 应用包名、多用户及应用独立安全补丁配置。
+- RSA / EC Keybox 导入与证书链信息查看。
+- 安全补丁同步与恢复、Pixel PIF 配置 Soter HAL、本地软件 TA、远程中继及 Tencent Soter
+- 运行状态诊断、主题与语言设置。
 
-2. [Configure OMK](docs/CONFIGURATION.md) if needed.
+Keybox 至少需要一个完整的 RSA 或 EC 条目，私钥必须与证书链匹配。
+详细配置位于 `/data/misc/keystore/omk/`，请勿公开密钥
+## 注意事项
 
-3. Change the active keybox.xml from the WebUI (if you need)
-
-The keybox file must contain at least one complete RSA or EC entry, and every
-private key present must match its certificate chain. A keybox may contain both
-algorithms or only one; RKP-extracted keyboxes are legitimately EC-only. Keep
-the XML free of extra content such as watermarks or invisible characters. The
-embedded WebUI opens Android's system document picker when installing a
-replacement, so the default file manager or another installed storage app such
-as MT Manager can provide the file. The picker requests all MIME types; the
-WebUI still requires an `.xml` file and the native helper performs the complete
-validation. If the system picker cannot be opened, the WebUI falls back to its
-shared-storage browser.
-
-The active files are `/data/misc/keystore/omk/config.toml` and
-`/data/misc/keystore/omk/injector.toml`. Read the
-[Configuration Guide](docs/CONFIGURATION.md) for complete annotated examples,
-field-by-field explanations, safety notes, and restart requirements.
-
-The `[main]` settings `ta_operation_delay_ms`, `ta_generation_delay_ms`, and
-`ta_control_delay_ms` in `config.toml` add a fresh random wait before each
-covered software TA call. Their default ranges are `[9, 21]`, `[6, 16]`, and
-`[1, 4]` milliseconds, including when a field is absent. Set a range to
-`[0, 0]` to disable that category. Valid changes apply to new calls without a
-restart. These are extra waits, which add to any enabled injector delays;
-they do not provide hardware security or guarantee a detector result. See
-[TA delay ranges](docs/CONFIGURATION.md#ta-delay-ranges) for coverage and limits.
-
-Optional `injector.toml` settings under `[main]` can mitigate timing-based client
-heuristics: `attestation_generation_delay_ms` delays successful challenged key
-generation replies, and `operation_start_delay_ms` delays two-way OMK
-`createOperation` calls before the RPC, including calls that return business
-errors. Both default to `0` (disabled), accept `0..250` milliseconds, and occupy
-a Binder worker while waiting. They do not provide hardware security or
-guarantee a detector result. See the Configuration Guide before enabling them.
-
-In `injector.toml`, keep the `scoop = [` and closing `]` lines, then add each
-exact package name on its own line. Bare entries omit both quotes and commas;
-blank lines and lines beginning with `#` are ignored. The traditional quoted,
-comma-separated TOML form remains accepted.
-
-## Embedded WebUI
-
-The module includes a WebUI for choosing the exact packages in `scoop`,
-installing a local keybox, managing the Android security patch level, and
-applying a Pixel PIF fingerprint through OMK's own Zygisk payload. It also
-provides an ADB Disabler with independent controls for developer options, USB
-debugging, and OEM unlocking:
-
-- In KernelSU, open Oh My Keymint from the module list and select its WebUI.
-- In Magisk, open an installed KSUWebUIStandalone or WebUI X host and select
-  Oh My Keymint. The module does not install a WebUI host.
-
-The WebUI uses bundled assets for normal operation. **Sync security patch**
-uses the module's native HTTPS client to download the Android Security Bulletin
-overview from Google's official `source.android.com` host (with its official
-Chinese mirror as a fallback), and parses the newest published patch level.
-The synchronized value always uses that level's year and month. If the saved
-default `ro.build.version.security_patch` ends in day `01`, it uses day `01`;
-otherwise it keeps Google's published date. A saved day `05` therefore follows
-Google's published date. If the saved system and vendor patch dates disagree,
-the system date determines this choice. It does not require `curl` or
-`wget` on the device. TLS uses the client's embedded WebPKI roots, and HTTPS
-redirects are accepted only when they end at the official bulletin page.
-Before the first sync, the
-helper records the current `ro.build.version.security_patch` and
-`ro.vendor.build.security_patch` values in
-`/data/misc/keystore/omk/data/security_patch_defaults.toml`. Later syncs keep
-that original snapshot. Each sync writes the selected date to all four
-`[trust]` patch-level fields and applies it to both runtime properties with
-`resetprop`. While that valid snapshot remains, the module's early boot hook
-reapplies the paired properties before Android framework values are cached;
-keymint also reapplies them at startup. A manually configured exact date
-without the snapshot continues to use the normal configuration behavior. After a
-successful sync or restore, the WebUI reports completion and asks you to reboot;
-it does not reboot the device automatically.
-
-**Restore default security patch** does not use the network. It restores both
-runtime properties from the saved snapshot, sets `security_patch`,
-`os_patchlevel`, `vendor_patchlevel`, and `boot_patchlevel` to `auto`, and then
-deletes the snapshot. These runtime properties are global for the current boot,
-so other processes can observe the synchronized or restored values. A failed
-operation is reported, property writes are rolled back when a later step fails,
-and a snapshot needed for another restore attempt is retained.
-
-**Spoof PIF fingerprint** downloads the current Pixel device catalog and the
-selected profile from the `bot` branch of `KOWX712/PlayIntegrityFix`. That feed
-is generated daily from Google's Android preview pages, Android Flash Tool
-metadata, and Pixel security bulletin. The native helper validates the
-catalog, the four profile fields, and the complete fingerprint structure. It
-then derives the matching Build fields and atomically stores the active profile
-at `/data/misc/keystore/omk/data/pif_fingerprint.json`. OMK's own Zygisk
-payload applies these values inside newly started
-`com.google.android.gms.unstable` and `com.android.vending` processes (including
-their named `:...` child processes) through the Zygisk Next loader. During
-pre-app specialization it installs available PLT hooks and, on AArch64, tries a
-process-wide bionic callback hook only after validating the wrapper semantics,
-memory mappings, and BTI/MTE permissions. A rejected callback hook leaves libc
-unchanged, records the reason, and continues with the available PLT and Java
-paths. Java `Build` fields and a property probe are updated after
-specialization.
-Zygisk Next must already be
-installed and enabled by the user; OMK does not bundle, install, or implement
-that loader. The selected values are process-local, are not global Android
-properties, and do not change OMK's `[device]` identity. Disabling the action
-removes the OMK profile and restarts the affected processes so their next
-instances use the original values.
-
-The ADB Disabler action stores four strict `0/1` values in
-`/data/misc/keystore/omk/data/adb_disabler.conf`. When enabled, the selected
-settings are applied immediately and replayed by the module service at every
-boot. Disabling the master switch stops future replay; it intentionally does
-not restore properties already changed during the current boot.
-
-The security-patch and PIF network actions use the bundled native HTTPS client
-and require neither `curl` nor `wget`. Other WebUI operations remain local.
-The WebUI can also read and replace `scoop` and select a local XML file from
-shared storage or through another installed file app to replace the active OMK
-keybox. The security-patch actions do not change secrets, identity fields, or
-other settings.
-
-When the module is uninstalled from KernelSU, its bundled uninstaller removes
-exactly `/data/adb/omk` and `/data/misc/keystore/omk`, including OMK-created key
-data. This is irreversible and can require affected apps to register or sign in
-again; disabling the module does not remove the directories. Reboot after an
-uninstall.
-
-Saving `scoop` is delegated to the native `inject` helper, which validates the
-current configuration and package names before atomically replacing
-`injector.toml`. Installing a keybox is delegated to the native `keymint`
-helper. That helper checks the size, decodes UTF-8, and performs the complete
-in-memory `KeyBox` validation before atomically replacing the canonical
-lowercase `/data/misc/keystore/omk/keybox.xml`. A failed read, size, UTF-8,
-validation, or write leaves the corresponding active file unchanged. The
-appropriate watcher loads a successful change automatically, so a restart is
-normally unnecessary.
-
-Third-party source and licensing details for the adapted WebUI are listed in
-[Third-Party Software](docs/THIRD_PARTY.md).
+- 软件实现不能替代真实 TEE 或生物认证，不保证通过检测或支付认证。
+- 使用前请备份重要数据，实验性功能请谨慎开启。
+- 卸载会删除 OMK 配置及密钥数据，可能需要相关应用重新登录或注册；禁用模块不会删除这些数据。
 
 ## Restarting keymint and injector
 
-The module ships two background daemons: one for `keymint`, one for `injector`.
-You can restart them by following commands.
+需要手动重启服务时，可执行对应命令：
 
 ```sh
 touch /data/adb/omk/restart.keymint
@@ -168,70 +40,17 @@ touch /data/adb/omk/restart.injector
 touch /data/adb/omk/restart.all
 ```
 
-See the [Configuration Guide](docs/CONFIGURATION.md#how-changes-are-loaded) for
-which changes need a component restart or a full device reboot.
+哪些设置需要重启服务或设备，请参阅[生效说明](docs/CONFIGURATION.md#how-changes-are-loaded)。
 
-## License
+## 许可与致谢
 
-**YOU MUST AGREE TO BOTH OF THE LICENSE BEFORE USING THIS SOFTWARE.**
+使用前须同时同意 [AGPL-3.0-or-later](LICENSE.md) 和 [Oh My Keymint License](LICENSE-2)。
+本软件按原样提供，不作任何担保。
 
-`AGPL-3.0-or-later`
-
-```plaintext
-OhMyKeymint - Custom keymint implementation for Android Keystore Spoofer
 Copyright (C) 2025 James Clef <qwq233@qwq2333.top>
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as
-published by the Free Software Foundation, either version 3 of the
-License, or (at your option) any later version.
+部分代码来自 [AOSP](https://source.android.com/)，采用 [Apache-2.0](template/AOSP.Apache-license-2.0.txt)。
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-```
-
-`Oh My Keymint License`
-
-```plaintext
-1. 您不得将本软件、本软件的任意部分或将本软件作为依赖的软件用于任何商业用途。该
-   商业用途包括但不限于以盈利为目的，将本软件、本软件的任意部分或将本软件作为依
-   赖的软件与其他资源、物品或服务捆绑销售。
-
-2. 您不得暗示或明示本软件与其他软件有任何从属关系。
-
-3. 未经本软件作者书面允许，您不得超出合理使用范围或协议许可范围使用本软件的名称。
-
-4. 除非您所在的司法管辖区的适用法律另行规定，您同意将纠纷或争议提交至中国大陆境
-   内有管辖权的人民法院管辖。
-
-5. 本协议与GNU Affero General Public License（以下简称AGPL）共同发挥效力，
-   当本协议内容与AGPL冲突时，应当优先应用本协议内容，本协议仅覆盖本软件作者拥有
-   完全著作权的部分，对于使用其他协议的软件代码不发挥效力。
-```
-
-## Credit
-
-Some code from [AOSP](https://source.android.com/)
-
-License: `Apache-2.0`
-
-```plaintext
 Copyright 2022, The Android Open Source Project
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
+其他第三方来源与许可见[第三方软件说明](docs/THIRD_PARTY.md)。
